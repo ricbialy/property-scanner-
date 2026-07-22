@@ -272,3 +272,36 @@ paths:
       summary: List opening photos with short-lived download URLs
       parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
       responses: { "200": { description: OK } }
+  /v1/plans/{planId}/revisions:
+    post:
+      summary: >-
+        Create a correction revision from typed commands (renameRoom,
+        updateOpening, addOpening, removeOpening, verifyOpening) with
+        optimistic concurrency on parentRevisionId.
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "201": { description: New immutable draft revision }
+        "409": { description: Revision conflict (currentRevisionId returned) }
+        "422": { description: Command failed (commandIndex returned) }
+  /v1/plans/{planId}/revisions/{revisionId}/accept:
+    post:
+      summary: Accept the plan's current revision; supersedes others; emits plan.accepted
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: Accepted }
+        "409": { description: Only the current revision can be accepted }
+  /v1/diagnostics:
+    get:
+      summary: Testing-panel diagnostics (infrastructure health, never tenant data)
+      responses: { "200": { description: OK } }
+  /v1/webhook-endpoints:
+    post:
+      summary: Register a webhook endpoint (admin); secret stored encrypted; localhost-only while external webhooks are disabled
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "201": { description: Registered }
+        "422": { description: External webhooks disabled }
+    get:
+      summary: List active webhook endpoints (admin)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }

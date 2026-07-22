@@ -4,3 +4,4 @@ export * from "./resources.js";
 export * from "./plan.js";
 export * from "./exterior.js";
 export * from "./media.js";
+export * from "./commands.js";

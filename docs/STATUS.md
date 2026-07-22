@@ -3,6 +3,40 @@
 Honest ledger against `docs/PROPERTY_SCAN_DEV.md`. Nothing below claims more
 than the tests demonstrate.
 
+## Feature-status matrix
+
+Classification: **Planned** (no code) → **Source implemented** (written, never
+compiled/executed) → **Compiled** (builds) → **Automatically tested** (tests
+execute green) → **Device tested** (verified on target hardware) →
+**Field validated** (checked against real reference measurements) →
+**MVP ready** (complete user workflow usable).
+
+| Feature                                            | Status                          | Evidence                                             |
+| -------------------------------------------------- | ------------------------------- | ---------------------------------------------------- |
+| API: tenancy, properties, floors, scan sessions    | Automatically tested            | integration suite, CI                                |
+| Handoff deep-link tokens (issue/redeem)            | Automatically tested            | integration suite                                    |
+| Resumable chunked uploads (server)                 | Automatically tested            | interrupted-upload test + test-demo                  |
+| Import pipeline + geometry normalization           | Automatically tested            | fixture matrix (6 variants)                          |
+| Window/door schedules (imperial display)           | Automatically tested            | integration suite + demo output                      |
+| Correction commands + immutable revisions + accept | Automatically tested            | integration suite                                    |
+| Measurement provenance / field-verified marking    | Automatically tested            | integration suite                                    |
+| Media pipeline (photos, EXIF strip, links)         | Automatically tested            | integration suite                                    |
+| Webhook delivery (signed, retried, deduplicated)   | Automatically tested            | worker integration + simulator                       |
+| StudioKL simulated integration                     | Automatically tested            | test-demo scenario 2 (`.local/studiokl-import.json`) |
+| Browser dashboard + status panel                   | Compiled, manually smoke-tested | `next build` green; pages return 200 in test-demo    |
+| Browser floor-plan viewer + opening editor         | Compiled, manually smoke-tested | plan page 200; no automated UI tests yet             |
+| iOS capture app (all of it)                        | **Source implemented only**     | never compiled — no macOS in dev environment         |
+| iOS on-device capture / offline resume             | Planned→Source implemented      | requires Mac + device (see device-testing-guide)     |
+| Exterior facade records + entitlements             | Automatically tested            | integration suite (gated off by default)             |
+| Exterior scanning (Phases 7A–7D)                   | Planned                         | deliberately not started                             |
+| SVG/PDF exports                                    | Planned                         | normalized JSON export exists; renderers do not      |
+| Accuracy / measurement tolerance                   | **Not validated**               | worksheet + stats tool ready; zero field data        |
+| Complete MVP workflow (scan→schedule)              | **Not MVP ready**               | blocked on iOS compilation + device test             |
+
+Latest executed test counts (this environment, embedded PostgreSQL 16):
+**58 unit + 27 integration tests passing**; `make test-demo` runs the full
+fixture workflow end-to-end including webhook → simulated StudioKL import.
+
 ## Done (with tests)
 
 **Phase 0 — repository & architecture baseline**

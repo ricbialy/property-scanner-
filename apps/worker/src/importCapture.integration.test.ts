@@ -349,3 +349,90 @@ describe("duplicate opening detection", () => {
     expect(duplicateFindings[0]!.message).toContain("5f3a1b2c-3002");
   });
 });
+
+describe("outbox webhook dispatch", () => {
+  it("delivers signed events to registered endpoints, retries failures, deduplicates", async () => {
+    const { createServer } = await import("node:http");
+    const { createOrganizationWithOwner: mkOrg } = await import("@propertyscan/database");
+    const { createWebhookEndpoint, appendOutboxEvent } = await import("@propertyscan/database");
+    const { verifyWebhookSignature, SIGNATURE_HEADER } =
+      await import("@propertyscan/integration-studiokl");
+    const { dispatchOutbox } = await import("./dispatchOutbox.js");
+
+    const masterKey = "dev-only-not-a-real-key-0000000000000000";
+    const secret = "webhook-test-secret-0001";
+    const org = await mkOrg(pool, { name: "Webhook Org", ownerUserId: "user_webhook" });
+
+    const received: Array<{ body: string; signature: string }> = [];
+    let failNext = true;
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        if (failNext) {
+          failNext = false;
+          res.writeHead(500).end();
+          return;
+        }
+        received.push({ body, signature: String(req.headers[SIGNATURE_HEADER] ?? "") });
+        res.writeHead(200).end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+
+    await createWebhookEndpoint(pool, org.id, {
+      url: `http://127.0.0.1:${port}/hooks`,
+      secret,
+      masterKey
+    });
+    const eventId = await appendOutboxEvent(pool, {
+      organizationId: org.id,
+      eventType: "plan.accepted",
+      resourceType: "plan",
+      resourceId: "0198dddd-0000-7000-8000-000000000001",
+      payload: { planId: "0198dddd-0000-7000-8000-000000000001" }
+    });
+
+    const dispatchDeps = {
+      pool,
+      log: deps.log,
+      masterKey,
+      externalWebhooksDisabled: true // localhost is still permitted
+    };
+
+    // First pass: endpoint fails -> delivery marked failed with backoff.
+    await dispatchOutbox(dispatchDeps);
+    let delivery = await pool.query("select * from webhook_deliveries where outbox_event_id = $1", [
+      eventId
+    ]);
+    expect(delivery.rows[0].status).toBe("failed");
+    expect(delivery.rows[0].attempts).toBe(1);
+
+    // Force the retry window open and dispatch again: delivered + verifiable.
+    await pool.query(
+      "update webhook_deliveries set next_attempt_at = now() where outbox_event_id = $1",
+      [eventId]
+    );
+    await dispatchOutbox(dispatchDeps);
+    delivery = await pool.query("select * from webhook_deliveries where outbox_event_id = $1", [
+      eventId
+    ]);
+    expect(delivery.rows[0].status).toBe("succeeded");
+    expect(received).toHaveLength(1);
+
+    const verdict = verifyWebhookSignature(received[0]!.body, received[0]!.signature, {
+      secretsByKeyId: { k1: secret }
+    });
+    expect(verdict).toMatchObject({ ok: true, keyId: "k1" });
+    const envelope = JSON.parse(received[0]!.body);
+    expect(envelope.eventId).toBe(eventId);
+    expect(envelope.eventType).toBe("plan.accepted");
+
+    // Re-running the dispatcher does not deliver the same event twice.
+    await dispatchOutbox(dispatchDeps);
+    expect(received).toHaveLength(1);
+
+    server.close();
+  });
+});

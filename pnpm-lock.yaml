@@ -127,6 +127,9 @@ importers:
       '@propertyscan/geometry':
         specifier: workspace:*
         version: link:../../packages/geometry
+      '@propertyscan/integration-studiokl':
+        specifier: workspace:*
+        version: link:../../integrations/studiokl
       '@propertyscan/observability':
         specifier: workspace:*
         version: link:../../packages/observability

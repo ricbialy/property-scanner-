@@ -34,3 +34,11 @@ db-down:
 ## demo: run the end-to-end vertical slice against a locally running stack.
 demo:
 	./scripts/demo-vertical-slice.sh
+
+## test-demo: start everything, seed all fixture scenarios, print test URLs.
+test-demo:
+	./scripts/test-demo.sh
+
+## stop-demo: stop services started by test-demo.
+stop-demo:
+	./scripts/stop-demo.sh

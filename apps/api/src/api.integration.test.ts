@@ -749,3 +749,218 @@ describe("media pipeline", () => {
     expect(cross.statusCode).toBe(404);
   });
 });
+
+describe("plan corrections and acceptance", () => {
+  async function seedPlan(userId: string, orgId: string, floorId: string, sessionId: string) {
+    const roomId = "0198cccc-0000-7000-8000-000000000001";
+    const wallId = "0198cccc-0000-7000-8000-000000000002";
+    const openingId = "0198cccc-0000-7000-8000-000000000003";
+    const { plan, revision } = await withTransaction(ctx.pool, (tx) =>
+      createPlanWithInitialRevision(tx, orgId, {
+        floorId,
+        scanSessionId: sessionId,
+        reason: "import",
+        geometrySchemaVersion: GEOMETRY_SCHEMA_VERSION,
+        buildPayload: (planId, revisionId) => ({
+          schemaVersion: GEOMETRY_SCHEMA_VERSION,
+          planId,
+          revisionId,
+          coordinateConventions: {
+            units: "meters",
+            plan: "x-z-projection",
+            winding: "ccw",
+            angles: "radians"
+          },
+          rooms: [
+            {
+              id: roomId,
+              name: "Kitchen",
+              sourceRoomId: roomId,
+              boundary: [
+                { x: 0, y: 0 },
+                { x: 3, y: 0 },
+                { x: 3, y: 3 },
+                { x: 0, y: 3 }
+              ],
+              areaM2: 9,
+              confidence: "high"
+            }
+          ],
+          walls: [
+            {
+              id: wallId,
+              sourceId: null,
+              roomId,
+              start: { x: 0, y: 0 },
+              end: { x: 3, y: 0 },
+              thicknessM: 0.12,
+              heightM: 2.44,
+              source: "roomplan",
+              confidence: "high"
+            }
+          ],
+          openings: [
+            {
+              id: openingId,
+              sourceId: null,
+              type: "window",
+              wallId,
+              offsetAlongWallM: 1.5,
+              widthM: 0.9,
+              heightM: 1.2,
+              sillHeightM: 0.9,
+              roomIds: [roomId],
+              confidence: "medium",
+              verification: "unverified"
+            }
+          ],
+          validationFindings: []
+        })
+      })
+    );
+    return { plan, revision, roomId, wallId, openingId };
+  }
+
+  it("applies typed commands into a new immutable revision, verifies, and accepts", async () => {
+    const orgId = await createOrg("mia", "Mia Corrections Co");
+    const { propertyId, floorId } = await createPropertyAndFloor("mia", orgId);
+    const session = await createScanSession(ctx.pool, orgId, {
+      propertyId,
+      floorId,
+      requestedOutputs: ["normalized_json"],
+      externalReferences: []
+    });
+    // Put the session into needs_review so acceptance can complete it.
+    for (const [from, to] of [
+      ["draft", "capturing"],
+      ["capturing", "local_review"],
+      ["local_review", "queued_upload"],
+      ["queued_upload", "uploading"],
+      ["uploading", "processing"],
+      ["processing", "needs_review"]
+    ]) {
+      await ctx.pool.query("update scan_sessions set status = $1 where id = $2 and status = $3", [
+        to,
+        session.id,
+        from
+      ]);
+    }
+    const { plan, revision, roomId, wallId, openingId } = await seedPlan(
+      "mia",
+      orgId,
+      floorId,
+      session.id
+    );
+
+    const correction = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions`,
+      headers: asUser("mia", orgId),
+      payload: {
+        parentRevisionId: revision.id,
+        reason: "field corrections",
+        commands: [
+          { type: "renameRoom", roomId, name: "Kitchen (verified)" },
+          { type: "verifyOpening", openingId, source: "laser", widthM: 0.914, heightM: 1.219 },
+          {
+            type: "addOpening",
+            opening: {
+              openingType: "door",
+              wallId,
+              roomIds: [roomId],
+              widthM: 0.91,
+              heightM: 2.03,
+              sillHeightM: null
+            }
+          }
+        ]
+      }
+    });
+    expect(correction.statusCode).toBe(201);
+    const v2 = correction.json();
+    expect(v2.version).toBe(2);
+    expect(v2.parentRevisionId).toBe(revision.id);
+    expect(v2.payload.rooms[0].name).toBe("Kitchen (verified)");
+    const verified = v2.payload.openings.find((o: { id: string }) => o.id === openingId);
+    expect(verified.verification).toBe("field_verified");
+    expect(verified.widthM).toBeCloseTo(0.914);
+    expect(v2.payload.openings).toHaveLength(2);
+
+    // Parent revision is untouched (immutable).
+    const parentRes = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/plans/${plan.id}/revisions/${revision.id}`,
+      headers: asUser("mia", orgId)
+    });
+    expect(parentRes.json().payload.rooms[0].name).toBe("Kitchen");
+    expect(parentRes.json().payload.openings).toHaveLength(1);
+
+    // Measurement provenance recorded for the laser verification.
+    const measurements = await ctx.pool.query(
+      "select * from measurements where subject_id = $1 order by semantic_type",
+      [openingId]
+    );
+    expect(measurements.rows.map((m) => m.semantic_type)).toEqual(["height", "width"]);
+    expect(measurements.rows.every((m) => m.source === "laser")).toBe(true);
+    expect(measurements.rows.every((m) => m.verification === "field_verified")).toBe(true);
+
+    // Stale save (old parent) is refused with the current revision id.
+    const stale = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions`,
+      headers: asUser("mia", orgId),
+      payload: {
+        parentRevisionId: revision.id,
+        reason: "stale",
+        commands: [{ type: "renameRoom", roomId, name: "X" }]
+      }
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().currentRevisionId).toBe(v2.id);
+
+    // Unknown reference is a command error, not a corrupt revision.
+    const badRef = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions`,
+      headers: asUser("mia", orgId),
+      payload: {
+        parentRevisionId: v2.id,
+        reason: "bad",
+        commands: [{ type: "removeOpening", openingId: "0198cccc-9999-7000-8000-000000000009" }]
+      }
+    });
+    expect(badRef.statusCode).toBe(422);
+
+    // Accepting an old revision is refused; accepting the current succeeds.
+    const acceptOld = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions/${revision.id}/accept`,
+      headers: asUser("mia", orgId)
+    });
+    expect(acceptOld.statusCode).toBe(409);
+
+    const accept = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions/${v2.id}/accept`,
+      headers: asUser("mia", orgId)
+    });
+    expect(accept.statusCode).toBe(200);
+    expect(accept.json().status).toBe("accepted");
+
+    const superseded = await ctx.pool.query("select status from plan_revisions where id = $1", [
+      revision.id
+    ]);
+    expect(superseded.rows[0].status).toBe("superseded");
+
+    const sessionAfter = await ctx.pool.query("select status from scan_sessions where id = $1", [
+      session.id
+    ]);
+    expect(sessionAfter.rows[0].status).toBe("completed");
+
+    const outbox = await ctx.pool.query(
+      "select event_type from outbox_events where organization_id = $1 and event_type = 'plan.accepted'",
+      [orgId]
+    );
+    expect(outbox.rows).toHaveLength(1);
+  });
+});

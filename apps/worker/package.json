@@ -17,6 +17,7 @@
     "@propertyscan/contracts": "workspace:*",
     "@propertyscan/database": "workspace:*",
     "@propertyscan/geometry": "workspace:*",
+    "@propertyscan/integration-studiokl": "workspace:*",
     "@propertyscan/observability": "workspace:*",
     "@propertyscan/storage": "workspace:*",
     "fflate": "^0.8.2",

@@ -202,8 +202,12 @@ export function registerMediaRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!parsed.success) {
       return sendValidationProblem(reply, parsed.error);
     }
+    // Payload opening ids are the stable identity; relational rows from
+    // corrected revisions carry them as sourceId in source_metadata.
     const opening = await deps.pool.query(
-      "select id from openings where id = $1 and organization_id = $2",
+      `select id from openings
+       where organization_id = $2 and (id::text = $1 or source_metadata->>'sourceId' = $1)
+       limit 1`,
       [openingId, tenant.organizationId]
     );
     if (opening.rows.length === 0) {
