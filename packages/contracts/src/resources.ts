@@ -134,8 +134,19 @@ export const createUploadRequestSchema = z.object({
 
 export const uploadResponseSchema = z.object({
   uploadId: uuidSchema,
-  /** Where the client PUTs the bundle. Local driver returns an API-relative path. */
-  uploadUrl: z.string(),
+  /**
+   * Where the client PUTs a single-part bundle (presigned URL or local API
+   * route). Null when the upload is chunked — use partUploadUrls instead.
+   */
+  uploadUrl: z.string().nullable(),
+  partCount: z.number().int().min(1),
+  /** Per-chunk PUT targets; empty for single-part uploads. */
+  partUploadUrls: z.array(
+    z.object({
+      partNumber: z.number().int().min(1),
+      uploadUrl: z.string()
+    })
+  ),
   objectKey: z.string(),
   expiresAt: isoTimestampSchema
 });

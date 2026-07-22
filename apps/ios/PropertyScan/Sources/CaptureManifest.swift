@@ -5,7 +5,7 @@ import Foundation
 /// (`@propertyscan/contracts` captureManifestSchema, schemaVersion 1.0).
 /// Must never contain authentication tokens.
 struct CaptureManifest: Codable, Equatable {
-    static let schemaVersion = "1.0"
+    static let currentSchemaVersion = "1.0"
 
     struct Device: Codable, Equatable {
         var model: String
@@ -38,7 +38,7 @@ struct CaptureManifest: Codable, Equatable {
         var contentType: String
     }
 
-    var schemaVersion = CaptureManifest.schemaVersion
+    var schemaVersion = CaptureManifest.currentSchemaVersion
     var scanSessionId: UUID
     var captureId: UUID
     var device: Device

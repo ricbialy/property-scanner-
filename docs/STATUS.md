@@ -3,6 +3,40 @@
 Honest ledger against `docs/PROPERTY_SCAN_DEV.md`. Nothing below claims more
 than the tests demonstrate.
 
+## Feature-status matrix
+
+Classification: **Planned** (no code) → **Source implemented** (written, never
+compiled/executed) → **Compiled** (builds) → **Automatically tested** (tests
+execute green) → **Device tested** (verified on target hardware) →
+**Field validated** (checked against real reference measurements) →
+**MVP ready** (complete user workflow usable).
+
+| Feature                                            | Status                          | Evidence                                             |
+| -------------------------------------------------- | ------------------------------- | ---------------------------------------------------- |
+| API: tenancy, properties, floors, scan sessions    | Automatically tested            | integration suite, CI                                |
+| Handoff deep-link tokens (issue/redeem)            | Automatically tested            | integration suite                                    |
+| Resumable chunked uploads (server)                 | Automatically tested            | interrupted-upload test + test-demo                  |
+| Import pipeline + geometry normalization           | Automatically tested            | fixture matrix (6 variants)                          |
+| Window/door schedules (imperial display)           | Automatically tested            | integration suite + demo output                      |
+| Correction commands + immutable revisions + accept | Automatically tested            | integration suite                                    |
+| Measurement provenance / field-verified marking    | Automatically tested            | integration suite                                    |
+| Media pipeline (photos, EXIF strip, links)         | Automatically tested            | integration suite                                    |
+| Webhook delivery (signed, retried, deduplicated)   | Automatically tested            | worker integration + simulator                       |
+| StudioKL simulated integration                     | Automatically tested            | test-demo scenario 2 (`.local/studiokl-import.json`) |
+| Browser dashboard + status panel                   | Compiled, manually smoke-tested | `next build` green; pages return 200 in test-demo    |
+| Browser floor-plan viewer + opening editor         | Compiled, manually smoke-tested | plan page 200; no automated UI tests yet             |
+| iOS capture app (all of it)                        | **Source implemented only**     | never compiled — no macOS in dev environment         |
+| iOS on-device capture / offline resume             | Planned→Source implemented      | requires Mac + device (see device-testing-guide)     |
+| Exterior facade records + entitlements             | Automatically tested            | integration suite (gated off by default)             |
+| Exterior scanning (Phases 7A–7D)                   | Planned                         | deliberately not started                             |
+| SVG/PDF exports                                    | Planned                         | normalized JSON export exists; renderers do not      |
+| Accuracy / measurement tolerance                   | **Not validated**               | worksheet + stats tool ready; zero field data        |
+| Complete MVP workflow (scan→schedule)              | **Not MVP ready**               | blocked on iOS compilation + device test             |
+
+Latest executed test counts (this environment, embedded PostgreSQL 16):
+**58 unit + 27 integration tests passing**; `make test-demo` runs the full
+fixture workflow end-to-end including webhook → simulated StudioKL import.
+
 ## Done (with tests)
 
 **Phase 0 — repository & architecture baseline**
@@ -100,6 +134,26 @@ than the tests demonstrate.
   capture UX polish (coaching, room connection prompts, review screen), opening
   photo capture, background URLSession transfers, sanitized real-device bundle
   checked in alongside the synthetic fixtures.
+
+## Phase 3 remainder (this iteration)
+
+- **Media pipeline (tested)**: register/upload/complete with checksum and
+  MIME-signature validation (JPEG/PNG/HEIC magic bytes; spoofed content types
+  rejected and the media marked rejected), pixel dimensions from JPEG SOF/PNG
+  IHDR, JPEG Exif APP1 removed before media becomes ready (whole-segment drop —
+  ADR trade-off documented in code; HEIC metadata deferred to the processing
+  worker as `unstripped_pending`), authorized downloads (presigned redirect on
+  S3, streamed behind auth on fs), and photo links to openings with ordering.
+- **Duplicate-opening detection (tested)**: near-coincident same-type openings
+  produce a `duplicate_opening_candidate` finding for human review — both
+  observations preserved, never auto-merged.
+- **OpenAPI 3.1 contract** (`docs/api/openapi.yaml`) verified by an integration
+  test: every documented operation must exist in the router; public routes are
+  allowlisted. Deferred: request/response schema validation generated from the
+  document.
+- Still open from Phase 3: thumbnails (needs an image toolchain in the worker),
+  HEIC metadata handling, richer topology validation (overlaps/self-
+  intersections).
 
 ## Exterior roadmap (amendment, Phases 7A–8 — not started by design)
 

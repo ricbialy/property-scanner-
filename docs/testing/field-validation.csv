@@ -1,0 +1,2 @@
+property,room,opening_key,opening_type,dimension,roomplan_in,corrected_in,reference_in,device,conditions,detected,correct_wall,false_opening,correction_seconds,scan_to_schedule_minutes
+EXAMPLE Cedar Lane,Kitchen,W01,window,width,47.25,48.0,48.125,iPhone 15 Pro,daylight; no occlusion,yes,yes,no,25,18
