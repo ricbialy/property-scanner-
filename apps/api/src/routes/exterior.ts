@@ -13,6 +13,7 @@ import {
   findPropertyById,
   listFacadeOpenings,
   listFacades,
+  isEntitled,
   recordAuditEvent,
   recordMeasurement,
   withTransaction,
@@ -20,9 +21,31 @@ import {
   type FacadeRow
 } from "@propertyscan/database";
 
-import type { AppDeps } from "../context.js";
+import type { AppDeps, TenantContext } from "../context.js";
 import { requireTenant } from "../plugins/auth.js";
 import { sendProblem, sendValidationProblem } from "../problems.js";
+import type { FastifyReply } from "fastify";
+
+/**
+ * Facade features require the exterior_capture entitlement (amendment §15),
+ * enforced server-side and disabled by default until acceptance gates pass.
+ */
+async function requireExteriorEntitlement(
+  deps: AppDeps,
+  tenant: TenantContext,
+  reply: FastifyReply
+): Promise<boolean> {
+  if (!(await isEntitled(deps.pool, tenant.organizationId, "exterior_capture"))) {
+    await sendProblem(
+      reply,
+      403,
+      "Exterior capture not enabled",
+      "This organization is not entitled to exterior facade features"
+    );
+    return false;
+  }
+  return true;
+}
 
 function serializeFacade(row: FacadeRow) {
   return {
@@ -55,6 +78,7 @@ export function registerExteriorRoutes(app: FastifyInstance, deps: AppDeps): voi
   app.post("/v1/properties/:propertyId/facades", async (request, reply) => {
     const tenant = await requireTenant(deps, request, reply, "member");
     if (!tenant) return;
+    if (!(await requireExteriorEntitlement(deps, tenant, reply))) return;
     const { propertyId } = request.params as { propertyId: string };
     const property = await findPropertyById(deps.pool, tenant.organizationId, propertyId);
     if (!property) {
@@ -78,6 +102,7 @@ export function registerExteriorRoutes(app: FastifyInstance, deps: AppDeps): voi
   app.get("/v1/properties/:propertyId/facades", async (request, reply) => {
     const tenant = await requireTenant(deps, request, reply, "viewer");
     if (!tenant) return;
+    if (!(await requireExteriorEntitlement(deps, tenant, reply))) return;
     const { propertyId } = request.params as { propertyId: string };
     const property = await findPropertyById(deps.pool, tenant.organizationId, propertyId);
     if (!property) {
@@ -90,6 +115,7 @@ export function registerExteriorRoutes(app: FastifyInstance, deps: AppDeps): voi
   app.post("/v1/facades/:facadeId/openings", async (request, reply) => {
     const tenant = await requireTenant(deps, request, reply, "member");
     if (!tenant) return;
+    if (!(await requireExteriorEntitlement(deps, tenant, reply))) return;
     const { facadeId } = request.params as { facadeId: string };
     const facade = await findFacadeById(deps.pool, tenant.organizationId, facadeId);
     if (!facade) {
@@ -116,6 +142,7 @@ export function registerExteriorRoutes(app: FastifyInstance, deps: AppDeps): voi
   app.get("/v1/facades/:facadeId/openings", async (request, reply) => {
     const tenant = await requireTenant(deps, request, reply, "viewer");
     if (!tenant) return;
+    if (!(await requireExteriorEntitlement(deps, tenant, reply))) return;
     const { facadeId } = request.params as { facadeId: string };
     const facade = await findFacadeById(deps.pool, tenant.organizationId, facadeId);
     if (!facade) {

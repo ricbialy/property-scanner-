@@ -37,3 +37,50 @@ export const measurementVerificationSchema = z.enum([
 ]);
 export const confidenceLevelSchema = z.enum(["high", "medium", "low", "unknown"]);
 export const openingTypeSchema = z.enum(["window", "door", "open_passage", "unknown"]);
+
+/** Capture modes (exterior amendment §7.1). Interior RoomPlan is the default. */
+export const captureModeSchema = z.enum([
+  "interior_roomplan",
+  "exterior_facade",
+  "opening_verification"
+]);
+export type CaptureMode = z.infer<typeof captureModeSchema>;
+
+/**
+ * Reserved exterior enums (amendment §7.6). Contract-level reservations only —
+ * no detector, no exterior reconstruction, no completion claim. Phase 7 work.
+ */
+export const exteriorOpeningTypeSchema = z.enum([
+  "window",
+  "exterior_door",
+  "garage_door",
+  "open_passage",
+  "storefront",
+  "vent",
+  "unknown"
+]);
+export type ExteriorOpeningType = z.infer<typeof exteriorOpeningTypeSchema>;
+
+export const detectionStateSchema = z.enum([
+  "suspected",
+  "visually_detected",
+  "geometry_confirmed",
+  "user_confirmed",
+  "field_verified",
+  "rejected"
+]);
+export type DetectionState = z.infer<typeof detectionStateSchema>;
+
+export const occlusionStateSchema = z.enum(["none", "partial", "severe", "unknown"]);
+export type OcclusionState = z.infer<typeof occlusionStateSchema>;
+
+export const entitlementKeySchema = z.enum([
+  "interior_capture",
+  "exterior_capture",
+  "opening_verification",
+  "facade_auto_detection",
+  "photogrammetry_processing",
+  "advanced_exports",
+  "api_access"
+]);
+export type EntitlementKeyContract = z.infer<typeof entitlementKeySchema>;

@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-import { isoTimestampSchema, scanSessionStatusSchema, uuidSchema } from "./common.js";
+import {
+  captureModeSchema,
+  isoTimestampSchema,
+  scanSessionStatusSchema,
+  uuidSchema
+} from "./common.js";
 
 export const roleSchema = z.enum(["owner", "admin", "member", "viewer"]);
 export type Role = z.infer<typeof roleSchema>;
@@ -72,6 +77,8 @@ export type Floor = z.infer<typeof floorSchema>;
 export const createScanSessionRequestSchema = z.object({
   propertyId: uuidSchema,
   floorId: uuidSchema,
+  /** Backwards-compatible discriminator: omitted means interior_roomplan. */
+  captureMode: captureModeSchema.default("interior_roomplan"),
   requestedOutputs: z
     .array(z.enum(["normalized_json", "svg", "pdf"]))
     .min(1)
@@ -94,6 +101,7 @@ export const scanSessionSchema = z.object({
   organizationId: uuidSchema,
   propertyId: uuidSchema,
   floorId: uuidSchema,
+  captureMode: captureModeSchema,
   status: scanSessionStatusSchema,
   requestedOutputs: z.array(z.enum(["normalized_json", "svg", "pdf"])),
   externalReferences: z.array(

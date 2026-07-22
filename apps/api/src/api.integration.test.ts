@@ -5,6 +5,7 @@ import { buildFixtureBundle } from "@propertyscan/roomplan-fixtures";
 import {
   createPlanWithInitialRevision,
   createScanSession,
+  setEntitlement,
   withTransaction
 } from "@propertyscan/database";
 import { GEOMETRY_SCHEMA_VERSION, uuidSchema } from "@propertyscan/contracts";
@@ -265,10 +266,70 @@ describe("scan session lifecycle", () => {
   });
 });
 
+describe("capture modes and entitlements", () => {
+  it("defaults sessions to interior_roomplan (backwards compatible)", async () => {
+    const orgId = await createOrg("gina", "Gina Interiors");
+    const { propertyId, floorId } = await createPropertyAndFloor("gina", orgId);
+    const res = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/scan-sessions",
+      headers: { ...asUser("gina", orgId), "idempotency-key": "gina-1" },
+      payload: { propertyId, floorId, requestedOutputs: ["normalized_json"] }
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().captureMode).toBe("interior_roomplan");
+  });
+
+  it("refuses exterior_facade sessions without the entitlement, allows with it", async () => {
+    const orgId = await createOrg("hank", "Hank Facades");
+    const { propertyId, floorId } = await createPropertyAndFloor("hank", orgId);
+    const body = {
+      propertyId,
+      floorId,
+      captureMode: "exterior_facade",
+      requestedOutputs: ["normalized_json"]
+    };
+
+    const denied = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/scan-sessions",
+      headers: { ...asUser("hank", orgId), "idempotency-key": "hank-1" },
+      payload: body
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().title).toBe("Capture mode not enabled");
+
+    await setEntitlement(ctx.pool, orgId, "exterior_capture", true, "test_admin");
+    const allowed = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/scan-sessions",
+      headers: { ...asUser("hank", orgId), "idempotency-key": "hank-2" },
+      payload: body
+    });
+    expect(allowed.statusCode).toBe(201);
+    expect(allowed.json().captureMode).toBe("exterior_facade");
+  });
+
+  it("gates facade endpoints behind exterior_capture", async () => {
+    const orgId = await createOrg("iris", "Iris Builders");
+    const { propertyId } = await createPropertyAndFloor("iris", orgId);
+    const denied = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/properties/${propertyId}/facades`,
+      headers: asUser("iris", orgId),
+      payload: { label: "Front" }
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().title).toBe("Exterior capture not enabled");
+  });
+});
+
 describe("exterior layer", () => {
   it("creates facades and openings, tenant-scoped", async () => {
     const orgId = await createOrg("dana", "Dana Exteriors");
     const otherOrg = await createOrg("evan", "Evan Roofing");
+    await setEntitlement(ctx.pool, orgId, "exterior_capture", true, "test_admin");
+    await setEntitlement(ctx.pool, otherOrg, "exterior_capture", true, "test_admin");
     const { propertyId } = await createPropertyAndFloor("dana", orgId);
 
     const facadeRes = await ctx.app.inject({

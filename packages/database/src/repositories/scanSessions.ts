@@ -8,6 +8,7 @@ export interface ScanSessionRow {
   organization_id: string;
   property_id: string;
   floor_id: string;
+  capture_mode: "interior_roomplan" | "exterior_facade" | "opening_verification";
   status: ScanSessionStatus;
   requested_outputs: string[];
   external_references: Array<{ system: string; type: string; value: string }>;
@@ -41,18 +42,20 @@ export async function createScanSession(
   input: {
     propertyId: string;
     floorId: string;
+    captureMode?: "interior_roomplan" | "exterior_facade" | "opening_verification";
     requestedOutputs: string[];
     externalReferences: Array<{ system: string; type: string; value: string }>;
   }
 ): Promise<ScanSessionRow> {
   const { rows } = await db.query(
-    `insert into scan_sessions (id, organization_id, property_id, floor_id, requested_outputs, external_references)
-     values ($1, $2, $3, $4, $5, $6) returning *`,
+    `insert into scan_sessions (id, organization_id, property_id, floor_id, capture_mode, requested_outputs, external_references)
+     values ($1, $2, $3, $4, $5, $6, $7) returning *`,
     [
       uuidv7(),
       organizationId,
       input.propertyId,
       input.floorId,
+      input.captureMode ?? "interior_roomplan",
       JSON.stringify(input.requestedOutputs),
       JSON.stringify(input.externalReferences)
     ]

@@ -17,12 +17,14 @@ import {
   findFloorById,
   findPropertyById,
   findScanSessionById,
+  isEntitled,
   issueHandoffToken,
   markCaptureArtifactUploaded,
   recordAuditEvent,
   redeemHandoffToken,
   transitionScanSession,
   withTransaction,
+  type EntitlementKey,
   type ScanSessionRow
 } from "@propertyscan/database";
 import { z } from "zod";
@@ -41,6 +43,7 @@ function serializeScanSession(row: ScanSessionRow) {
     organizationId: row.organization_id,
     propertyId: row.property_id,
     floorId: row.floor_id,
+    captureMode: row.capture_mode,
     status: row.status,
     requestedOutputs: row.requested_outputs,
     externalReferences: row.external_references,
@@ -58,6 +61,23 @@ export function registerScanSessionRoutes(app: FastifyInstance, deps: AppDeps): 
     const parsed = createScanSessionRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return sendValidationProblem(reply, parsed.error);
+    }
+    // Capture-mode entitlement is enforced server-side (amendment §15).
+    // interior_roomplan is on by default; exterior/verification modes stay
+    // disabled until their acceptance gates are satisfied.
+    const modeEntitlement: Record<string, EntitlementKey> = {
+      interior_roomplan: "interior_capture",
+      exterior_facade: "exterior_capture",
+      opening_verification: "opening_verification"
+    };
+    const requiredEntitlement = modeEntitlement[parsed.data.captureMode]!;
+    if (!(await isEntitled(deps.pool, tenant.organizationId, requiredEntitlement))) {
+      return sendProblem(
+        reply,
+        403,
+        "Capture mode not enabled",
+        `This organization is not entitled to '${parsed.data.captureMode}' capture`
+      );
     }
     await withIdempotency(
       deps,
@@ -81,6 +101,7 @@ export function registerScanSessionRoutes(app: FastifyInstance, deps: AppDeps): 
         const session = await createScanSession(deps.pool, tenant.organizationId, {
           propertyId: parsed.data.propertyId,
           floorId: parsed.data.floorId,
+          captureMode: parsed.data.captureMode,
           requestedOutputs: parsed.data.requestedOutputs,
           externalReferences: parsed.data.externalReferences ?? []
         });

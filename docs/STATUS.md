@@ -79,6 +79,30 @@ than the tests demonstrate.
   rooms), shared-door dedup across adjacent rooms, OpenAPI document.
 - **Exterior follow-ups**: iOS exterior photo capture UX, web facade panel,
   facade media attachment endpoints.
+
+## Exterior roadmap (amendment, Phases 7A–8 — not started by design)
+
+Per `docs/PROPERTY_SCAN_EXTERIOR_FACADE_AMENDMENT.md` §19, exterior
+implementation begins only after interior V1 is stable or is explicitly
+reprioritized. Compatibility groundwork already landed: capture-mode
+discriminator, server-enforced entitlements (exterior disabled by default),
+reserved contract enums, adapter boundary (ADR 0008).
+
+- **7A — Exterior research prototype**: guided single-facade native capture
+  (ARKit poses, intrinsics, frames, depth/mesh inventory), immutable manifest +
+  resumable upload, coarse plane fitting, facade-local projection of
+  user-marked reference dimensions, deterministic fixtures, field tests.
+- **7B — Opening detection & deduplication**: pluggable detector interface,
+  lawful labeled dataset with property-level splits, cross-frame tracking,
+  duplicate suppression, calibrated thresholds, human-review queue. No accuracy
+  claims before baseline evaluation.
+- **7C — Exterior editor & outputs**: elevation workspace, typed commands,
+  immutable facade revisions, grouping/schedules, wall/glazing/cladding areas,
+  SVG/PDF, StudioKL webhook flow.
+- **7D — Interior/exterior reconciliation**: OpeningMatchCandidate scoring,
+  manual confirm/reject, no automatic merges without a calibrated policy.
+- **8 — Larger-facade research** (photogrammetry/professional scans/drone
+  imagery as adapters) only after the phone baseline is measured.
 - **Phase 4**: browser editor (commands, undo/redo, optimistic concurrency),
   revision accept/compare, measurement verification UI.
 - **Phase 5**: SVG/PDF rendering package, export jobs, webhook delivery worker

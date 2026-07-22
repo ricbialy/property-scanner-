@@ -15,3 +15,4 @@ export * from "./repositories/audit.js";
 export * from "./repositories/outbox.js";
 export * from "./repositories/facades.js";
 export * from "./repositories/measurements.js";
+export * from "./repositories/entitlements.js";

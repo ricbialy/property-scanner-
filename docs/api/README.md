@@ -8,6 +8,12 @@ Authentication: `Authorization: Bearer <token>` (Clerk session JWT, or
 `dev_<userId>` in development). Tenant selection: `X-Organization-Id` header —
 validated server-side against memberships; it is never authorization by itself.
 
+Capture modes: `POST /v1/scan-sessions` accepts optional `captureMode`
+(`interior_roomplan` default, `exterior_facade`, `opening_verification`).
+Non-interior modes and all facade endpoints are gated by server-enforced tenant
+entitlements (`exterior_capture` is disabled by default) and return 403 with an
+explanatory problem when not granted.
+
 `Idempotency-Key` is **required** on `POST /v1/scan-sessions`. Replays with the
 same key+body return the stored response; same key with different body → 422.
 
