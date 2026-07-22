@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: propertyscan
+          POSTGRES_PASSWORD: propertyscan
+          POSTGRES_DB: propertyscan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U propertyscan"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://propertyscan:propertyscan@localhost:5432/propertyscan
+      WEBHOOK_MASTER_ENCRYPTION_KEY: dev-only-not-a-real-key-0000000000000000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Migration check (empty database)
+        run: pnpm db:migrate
+      - name: Migration idempotency check
+        run: pnpm db:migrate
+      - run: pnpm test:integration
+
+  # iOS compilation requires a macOS runner with Xcode; enabled once runners
+  # and (simulator-only, unsigned) toolchain configuration exist.
+  ios-placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "iOS simulator build runs on macOS CI once configured (no signing required)."

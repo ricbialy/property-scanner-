@@ -1,0 +1,338 @@
+import { createHash } from "node:crypto";
+
+import { unzipSync } from "fflate";
+import {
+  captureManifestSchema,
+  GEOMETRY_SCHEMA_VERSION,
+  NOT_PROCESSED,
+  type PlanRevisionPayload,
+  type ValidationFinding
+} from "@propertyscan/contracts";
+import { transformSanity } from "@propertyscan/geometry";
+import {
+  appendOutboxEvent,
+  createPlanWithInitialRevision,
+  finishImportRun,
+  insertRoomStub,
+  startImportRun,
+  transitionScanSession,
+  uuidv7,
+  withTransaction
+} from "@propertyscan/database";
+import type { ObjectStorage } from "@propertyscan/storage";
+import type pg from "pg";
+
+import { confidenceLevel, roomplanRoomSchema, roomplanStructureSchema } from "./roomplanAdapter.js";
+
+export interface ImportJobPayload {
+  importRunId: string;
+  organizationId: string;
+  scanSessionId: string;
+  captureArtifactId: string;
+}
+
+export class ImportError extends Error {
+  constructor(
+    message: string,
+    public readonly findings: ValidationFinding[] = []
+  ) {
+    super(message);
+    this.name = "ImportError";
+  }
+}
+
+/**
+ * Import pipeline (spec §9.4, current milestone scope):
+ * verify manifest + checksums, preserve raw artifacts immutably, parse RoomPlan
+ * JSON through a version-tolerant adapter, emit quality findings, and create the
+ * initial immutable plan revision transactionally. Geometry that is not yet
+ * normalized is explicitly `not_processed` — never invented.
+ */
+export async function processImportCapture(
+  pool: pg.Pool,
+  storage: ObjectStorage,
+  payload: ImportJobPayload
+): Promise<{ planId: string; revisionId: string }> {
+  const { organizationId, scanSessionId, importRunId } = payload;
+  await startImportRun(pool, importRunId);
+
+  const { rows } = await pool.query(
+    "select * from capture_artifacts where id = $1 and organization_id = $2",
+    [payload.captureArtifactId, organizationId]
+  );
+  const artifact = rows[0] as
+    { object_key: string; sha256: string | null; status: string } | undefined;
+  if (!artifact) {
+    throw new ImportError("capture artifact not found");
+  }
+  if (artifact.status !== "uploaded") {
+    throw new ImportError(`capture artifact in unexpected status '${artifact.status}'`);
+  }
+
+  const bundleBytes = await storage.get(artifact.object_key);
+  if (artifact.sha256) {
+    const digest = createHash("sha256").update(bundleBytes).digest("hex");
+    if (digest !== artifact.sha256) {
+      throw new ImportError("stored bundle no longer matches its recorded checksum");
+    }
+  }
+
+  const entries = unzipSync(bundleBytes);
+  const manifestBytes = entries["manifest.json"];
+  if (!manifestBytes) {
+    throw new ImportError("bundle is missing manifest.json");
+  }
+
+  const manifestParse = captureManifestSchema.safeParse(
+    JSON.parse(new TextDecoder().decode(manifestBytes))
+  );
+  if (!manifestParse.success) {
+    throw new ImportError(
+      "manifest failed schema validation",
+      manifestParse.error.issues.map((issue) => ({
+        code: "manifest_invalid",
+        severity: "error" as const,
+        message: `${issue.path.join(".")}: ${issue.message}`
+      }))
+    );
+  }
+  const manifest = manifestParse.data;
+  if (manifest.scanSessionId !== scanSessionId) {
+    throw new ImportError("manifest scanSessionId does not match the session being imported");
+  }
+
+  const findings: ValidationFinding[] = [];
+
+  // Verify every declared file's checksum and size against the actual bytes.
+  for (const file of manifest.files) {
+    const data = entries[file.path];
+    if (!data) {
+      throw new ImportError(`bundle is missing declared file ${file.path}`);
+    }
+    const digest = createHash("sha256").update(data).digest("hex");
+    if (digest !== file.sha256 || data.byteLength !== file.byteSize) {
+      throw new ImportError(`checksum mismatch for ${file.path}`);
+    }
+  }
+
+  // Preserve raw artifacts as immutable objects alongside the bundle.
+  const rawPrefix = `orgs/${organizationId}/scans/${scanSessionId}/captures/${manifest.captureId}/raw`;
+  for (const file of manifest.files) {
+    const key = `${rawPrefix}/${file.path}`;
+    if (!(await storage.exists(key))) {
+      await storage.put(key, entries[file.path]!, file.contentType);
+    }
+  }
+
+  // Parse each room through the adapter.
+  const parsedRooms: Array<{
+    roomId: string;
+    name: string | null;
+    confidence: "high" | "medium" | "low" | "unknown";
+  }> = [];
+  for (const room of manifest.rooms) {
+    const parse = roomplanRoomSchema.safeParse(
+      JSON.parse(new TextDecoder().decode(entries[room.roomplanFile]!))
+    );
+    if (!parse.success) {
+      findings.push({
+        code: "roomplan_room_unreadable",
+        severity: "error",
+        message: `room ${room.roomId}: ${parse.error.issues[0]?.message ?? "unreadable"}`,
+        subjectType: "room",
+        subjectId: room.roomId
+      });
+      continue;
+    }
+    const captured = parse.data;
+    if (captured.identifier.toLowerCase() !== room.roomId.toLowerCase()) {
+      findings.push({
+        code: "room_identifier_mismatch",
+        severity: "warning",
+        message: `manifest room ${room.roomId} contains capture ${captured.identifier}`,
+        subjectType: "room",
+        subjectId: room.roomId
+      });
+    }
+    if (captured.walls.length < 3) {
+      findings.push({
+        code: "room_wall_count_low",
+        severity: "warning",
+        message: `room ${room.roomId} has only ${captured.walls.length} walls; closed-room reconstruction is unlikely`,
+        subjectType: "room",
+        subjectId: room.roomId
+      });
+    }
+    for (const wall of captured.walls) {
+      if (wall.transform) {
+        const sanity = transformSanity(wall.transform);
+        if (!sanity.ok) {
+          findings.push({
+            code: "wall_transform_insane",
+            severity: "warning",
+            message: `wall ${wall.identifier}: ${sanity.reasons.join(", ")}`,
+            subjectType: "wall",
+            subjectId: wall.identifier
+          });
+        }
+      }
+    }
+    const wallConfidences = captured.walls.map((w) => confidenceLevel(w.confidence));
+    const roomConfidence = wallConfidences.includes("low")
+      ? "low"
+      : wallConfidences.includes("medium")
+        ? "medium"
+        : wallConfidences.includes("high")
+          ? "high"
+          : "unknown";
+    parsedRooms.push({
+      roomId: room.roomId,
+      name: room.name ?? null,
+      confidence: roomConfidence
+    });
+  }
+
+  if (parsedRooms.length === 0) {
+    throw new ImportError("no readable rooms in bundle", findings);
+  }
+
+  // Multiroom structure alignment presence check (normalization is Phase 3).
+  if (manifest.structureFile) {
+    const structureParse = roomplanStructureSchema.safeParse(
+      JSON.parse(new TextDecoder().decode(entries[manifest.structureFile]!))
+    );
+    if (!structureParse.success) {
+      findings.push({
+        code: "structure_unreadable",
+        severity: "warning",
+        message: "structure.json failed schema validation; automatic alignment unavailable"
+      });
+    } else {
+      for (const structRoom of structureParse.data.rooms) {
+        const sanity = transformSanity(structRoom.transform);
+        if (!sanity.ok) {
+          findings.push({
+            code: "structure_transform_insane",
+            severity: "warning",
+            message: `structure room ${structRoom.identifier}: ${sanity.reasons.join(", ")}`,
+            subjectType: "room",
+            subjectId: structRoom.identifier
+          });
+        }
+      }
+    }
+  } else {
+    findings.push({
+      code: "structure_missing",
+      severity: "info",
+      message: "bundle has no structure.json; multiroom alignment will require manual review"
+    });
+  }
+
+  findings.push({
+    code: "geometry_not_normalized",
+    severity: "info",
+    message:
+      "wall/opening geometry normalization is not yet implemented; geometry fields are explicitly not_processed"
+  });
+
+  // Create plan + immutable initial revision + room stubs, transition the
+  // session, and append the outbox event in ONE transaction (no webhook
+  // before durable commit).
+  const result = await withTransaction(pool, async (tx) => {
+    const { plan, revision } = await createPlanWithInitialRevision(tx, organizationId, {
+      floorId: (await tx.query("select floor_id from scan_sessions where id = $1", [scanSessionId]))
+        .rows[0].floor_id,
+      scanSessionId,
+      reason: `import of capture ${manifest.captureId}`,
+      geometrySchemaVersion: GEOMETRY_SCHEMA_VERSION,
+      buildPayload: (planId, revisionId): PlanRevisionPayload => ({
+        schemaVersion: GEOMETRY_SCHEMA_VERSION,
+        planId,
+        revisionId,
+        coordinateConventions: {
+          units: "meters",
+          plan: "x-z-projection",
+          winding: "ccw",
+          angles: "radians"
+        },
+        rooms: parsedRooms.map((room) => ({
+          id: uuidv7(),
+          name: room.name,
+          sourceRoomId: room.roomId,
+          boundary: NOT_PROCESSED,
+          areaM2: NOT_PROCESSED,
+          confidence: room.confidence
+        })),
+        walls: [],
+        openings: [],
+        validationFindings: findings
+      })
+    });
+
+    for (const room of revision.payload.rooms) {
+      await insertRoomStub(tx, organizationId, {
+        id: room.id,
+        planRevisionId: revision.id,
+        sourceRoomId: room.sourceRoomId,
+        name: room.name,
+        confidence: room.confidence
+      });
+    }
+
+    const transitioned = await transitionScanSession(
+      tx,
+      organizationId,
+      scanSessionId,
+      "processing",
+      "needs_review",
+      { planId: plan.id }
+    );
+    if (!transitioned) {
+      throw new ImportError("scan session left 'processing' state during import");
+    }
+
+    await finishImportRun(tx, importRunId, { status: "succeeded", findings });
+    await appendOutboxEvent(tx, {
+      organizationId,
+      eventType: "scan.needs_review",
+      resourceType: "scan_session",
+      resourceId: scanSessionId,
+      payload: { scanSessionId, planId: plan.id, revisionId: revision.id }
+    });
+    return { planId: plan.id, revisionId: revision.id };
+  });
+
+  return result;
+}
+
+/** Mark the import failed and surface the reason to the user-visible session. */
+export async function failImportCapture(
+  pool: pg.Pool,
+  payload: ImportJobPayload,
+  error: ImportError | Error
+): Promise<void> {
+  const findings = error instanceof ImportError ? error.findings : [];
+  await withTransaction(pool, async (tx) => {
+    await finishImportRun(tx, payload.importRunId, {
+      status: "failed",
+      findings,
+      error: error.message
+    });
+    await transitionScanSession(
+      tx,
+      payload.organizationId,
+      payload.scanSessionId,
+      "processing",
+      "failed",
+      { failureReason: error.message }
+    );
+    await appendOutboxEvent(tx, {
+      organizationId: payload.organizationId,
+      eventType: "scan.failed",
+      resourceType: "scan_session",
+      resourceId: payload.scanSessionId,
+      payload: { scanSessionId: payload.scanSessionId, reason: error.message }
+    });
+  });
+}

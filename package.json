@@ -1,0 +1,27 @@
+{
+  "name": "property-scan",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Property Scan — multi-tenant SaaS for LiDAR property capture, correction, and export",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.0.0 <23"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:integration": "turbo run test:integration",
+    "test:e2e": "turbo run test:e2e",
+    "db:migrate": "pnpm --filter @propertyscan/database run migrate",
+    "db:seed": "pnpm --filter @propertyscan/database run seed",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json,yaml,yml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,md,json,yaml,yml}\""
+  },
+  "devDependencies": {
+    "prettier": "^3.5.3",
+    "turbo": "^2.5.4"
+  }
+}

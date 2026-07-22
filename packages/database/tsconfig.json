@@ -1,0 +1,5 @@
+{
+  "extends": "@propertyscan/typescript-config/library.json",
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.integration.test.ts"]
+}

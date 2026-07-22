@@ -1,0 +1,45 @@
+# XcodeGen project definition. Generate the Xcode project locally with:
+#   brew install xcodegen && xcodegen generate
+# Signing is developer-local (see README.md); nothing signable is committed.
+name: PropertyScan
+options:
+  bundleIdPrefix: com.propertyscan.dev # placeholder bundle id — final id is an open decision
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: "" # set locally, never commit a real team id
+targets:
+  PropertyScan:
+    type: application
+    platform: iOS
+    sources: [PropertyScan/Sources]
+    info:
+      path: PropertyScan/Info.plist
+      properties:
+        CFBundleDisplayName: Property Scan
+        NSCameraUsageDescription: >-
+          Property Scan uses the camera and LiDAR sensor to capture room
+          geometry for floor plans. Camera frames are processed on device and
+          are not uploaded.
+        UILaunchScreen: {}
+        CFBundleURLTypes:
+          - CFBundleURLSchemes: [propertyscan]
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2" # iPhone and iPad
+  PropertyScanTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [PropertyScan/Tests]
+    dependencies:
+      - target: PropertyScan
+schemes:
+  PropertyScan:
+    build:
+      targets:
+        PropertyScan: all
+    test:
+      targets: [PropertyScanTests]
