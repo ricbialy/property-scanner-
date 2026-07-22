@@ -1,10 +1,10 @@
 # Real-device testing guide (iPhone 15 Pro / LiDAR iPad Pro)
 
-**Honest status first:** the iOS app is _source implemented_ but has **never been
-compiled** — the development environment for this repository has no macOS.
-Expect to fix compile errors on first build (RoomPlan/SwiftUI API details can
-only be validated against a real Xcode SDK). A Mac is **mandatory** for building;
-alternatives are listed at the end.
+**Honest status first:** the iOS app **compiles and passes its unit tests on
+the iOS Simulator in CI** (macos-15 runner, Xcode 16). It has **never run on a
+physical device** — RoomPlan capture cannot execute in the simulator, so the
+first real scan is still the real test. A Mac is **mandatory** for installing
+onto your iPhone; alternatives are listed at the end.
 
 ## 1. Requirements
 

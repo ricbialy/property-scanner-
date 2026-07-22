@@ -6,14 +6,13 @@ checksummed capture bundles.
 
 ## Status — IMPORTANT
 
-**Every file in this directory is *source implemented only*: it has never been
-compiled.** The development environment for this repository has no macOS, so no
-Xcode build has ever run. Expect compile errors on first build (RoomPlan and
-SwiftUI API details can only be confirmed against a real SDK) and treat fixing
-them as the first task on a Mac — see
-`docs/testing/device-testing-guide.md` for the full setup, and set the
-repository variable `ENABLE_IOS_CI=true` to compile on GitHub's macOS runners
-without owning a Mac.
+**Status: Compiled and unit-tested on the iOS Simulator via CI — never run on
+a physical device.** The `ios` CI job (macos-15, Xcode 16, iPhone 16 Pro
+simulator) builds the app and runs the XCTest suite on every push. RoomPlan
+capture itself cannot execute in the simulator, so scanning, upload-resume
+behaviour on a jobsite, and measurement quality remain unverified until a real
+LiDAR device runs it — see `docs/testing/device-testing-guide.md`. To pause the
+macOS CI job (paid minutes), set repository variable `DISABLE_IOS_CI=true`.
 
 ## What the source implements
 
