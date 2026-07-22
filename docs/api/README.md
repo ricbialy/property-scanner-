@@ -30,6 +30,8 @@ same key+body return the stored response; same key with different body → 422.
 | `POST /v1/scan-sessions/{id}/handoff-token`                              | issue single-use deep-link token (15 min TTL)                                                                                |
 | `POST /v1/scan-handoff/redeem`                                           | unauthenticated single-use token redemption → capture-scoped metadata                                                        |
 | `POST /v1/scan-sessions/{id}/uploads`                                    | register bundle upload (idempotent per captureId); returns presigned URL (s3) or local PUT route (fs)                        |
+| `GET /v1/scan-sessions/{id}/uploads/{uploadId}`                          | resume state: received and missing part numbers                                                                              |
+| `PUT /v1/scan-sessions/{id}/uploads/{uploadId}/parts/{n}`                | local-driver chunk upload (idempotent per part; S3 uses presigned per-part URLs)                                             |
 | `PUT /v1/scan-sessions/{id}/uploads/{uploadId}/content`                  | local-driver byte upload                                                                                                     |
 | `POST /v1/scan-sessions/{id}/uploads/{uploadId}/complete`                | verify SHA-256 + size against stored bytes                                                                                   |
 | `POST /v1/scan-sessions/{id}/complete`                                   | transition to processing, create import run, enqueue idempotent import job                                                   |

@@ -127,7 +127,9 @@ export type HandoffTokenResponse = z.infer<typeof handoffTokenResponseSchema>;
 export const createUploadRequestSchema = z.object({
   captureId: uuidSchema,
   byteSize: z.number().int().positive(),
-  contentType: z.literal("application/zip")
+  contentType: z.literal("application/zip"),
+  /** Number of chunks for resumable upload; 1 means a single direct upload. */
+  partCount: z.number().int().min(1).max(10_000).default(1)
 });
 
 export const uploadResponseSchema = z.object({

@@ -26,27 +26,69 @@ export interface FixtureBundle {
 }
 
 /**
- * Assemble the deterministic two-room capture bundle for a given scan session.
- * File hashes in the manifest are computed from the real fixture bytes, so the
- * import pipeline's checksum verification is exercised genuinely.
+ * Fixture variants for the import test matrix (spec §15.1):
+ * - `two-room`: multiroom aligned via structure.json (default);
+ * - `single-room`: one room, no structure result;
+ * - `missing-wall`: the kitchen with one wall removed, so the room boundary
+ *   cannot close and the pipeline must emit a finding instead of geometry;
+ * - `unsupported-schema`: a manifest declaring a future schema version the
+ *   importer must reject cleanly.
  */
-export function buildFixtureBundle(
-  scanSessionId: string,
-  options?: { captureId?: string; corruptChecksums?: boolean }
-): FixtureBundle {
-  const encoder = new TextEncoder();
-  const filePaths = [
-    "roomplan/room-5f3a1b2c-0001-4a00-9000-00000000a001.json",
-    "roomplan/room-5f3a1b2c-0002-4a00-9000-00000000a002.json",
-    "roomplan/structure.json"
-  ] as const;
-  const sources = [
-    join(fixturesRoot, "two-room/roomplan/room-kitchen.json"),
-    join(fixturesRoot, "two-room/roomplan/room-living.json"),
-    join(fixturesRoot, "two-room/roomplan/structure.json")
-  ];
+export type FixtureVariant = "two-room" | "single-room" | "missing-wall" | "unsupported-schema";
 
-  const contents = sources.map((p) => new Uint8Array(readFileSync(p)));
+export interface FixtureOptions {
+  captureId?: string;
+  corruptChecksums?: boolean;
+  variant?: FixtureVariant;
+}
+
+/**
+ * Assemble a deterministic capture bundle for a given scan session. File
+ * hashes in the manifest are computed from the real bytes, so the import
+ * pipeline's checksum verification is exercised genuinely.
+ */
+export function buildFixtureBundle(scanSessionId: string, options?: FixtureOptions): FixtureBundle {
+  const encoder = new TextEncoder();
+  const variant = options?.variant ?? "two-room";
+
+  const kitchenPath = "roomplan/room-5f3a1b2c-0001-4a00-9000-00000000a001.json";
+  const livingPath = "roomplan/room-5f3a1b2c-0002-4a00-9000-00000000a002.json";
+  const structurePath = "roomplan/structure.json";
+
+  let kitchenBytes = new Uint8Array(
+    readFileSync(join(fixturesRoot, "two-room/roomplan/room-kitchen.json"))
+  );
+  if (variant === "missing-wall") {
+    const room = JSON.parse(new TextDecoder().decode(kitchenBytes)) as { walls: unknown[] };
+    room.walls = room.walls.slice(0, 3);
+    kitchenBytes = encoder.encode(JSON.stringify(room, null, 2));
+  }
+
+  const multiroom = variant === "two-room" || variant === "unsupported-schema";
+  const files: Array<{ path: string; bytes: Uint8Array }> = [
+    { path: kitchenPath, bytes: kitchenBytes }
+  ];
+  if (multiroom) {
+    files.push(
+      {
+        path: livingPath,
+        bytes: new Uint8Array(
+          readFileSync(join(fixturesRoot, "two-room/roomplan/room-living.json"))
+        )
+      },
+      {
+        path: structurePath,
+        bytes: new Uint8Array(readFileSync(join(fixturesRoot, "two-room/roomplan/structure.json")))
+      }
+    );
+  }
+
+  const rooms = [
+    { roomId: TWO_ROOM_FIXTURE.kitchenRoomId, name: "Kitchen", roomplanFile: kitchenPath },
+    ...(multiroom
+      ? [{ roomId: TWO_ROOM_FIXTURE.livingRoomId, name: "Living Room", roomplanFile: livingPath }]
+      : [])
+  ];
 
   const manifest: CaptureManifest = captureManifestSchema.parse({
     schemaVersion: "1.0",
@@ -63,25 +105,29 @@ export function buildFixtureBundle(
       startedAt: "2026-07-20T14:03:00Z",
       completedAt: "2026-07-20T14:11:30Z"
     },
-    rooms: [
-      { roomId: TWO_ROOM_FIXTURE.kitchenRoomId, name: "Kitchen", roomplanFile: filePaths[0] },
-      { roomId: TWO_ROOM_FIXTURE.livingRoomId, name: "Living Room", roomplanFile: filePaths[1] }
-    ],
-    structureFile: filePaths[2],
-    files: filePaths.map((path, i) => ({
-      path,
-      byteSize: contents[i]!.byteLength,
-      sha256: options?.corruptChecksums ? "0".repeat(64) : sha256(contents[i]!),
+    rooms,
+    ...(multiroom ? { structureFile: structurePath } : {}),
+    files: files.map((f) => ({
+      path: f.path,
+      byteSize: f.bytes.byteLength,
+      sha256: options?.corruptChecksums ? "0".repeat(64) : sha256(f.bytes),
       contentType: "application/json"
     }))
   });
 
+  // The unsupported-schema variant declares a future version AFTER validation,
+  // producing bytes the importer must reject at its own schema gate.
+  const manifestForZip: Record<string, unknown> = { ...manifest };
+  if (variant === "unsupported-schema") {
+    manifestForZip["schemaVersion"] = "99.0";
+  }
+
   const entries: Record<string, Uint8Array> = {
-    "manifest.json": encoder.encode(JSON.stringify(manifest, null, 2))
+    "manifest.json": encoder.encode(JSON.stringify(manifestForZip, null, 2))
   };
-  filePaths.forEach((path, i) => {
-    entries[path] = contents[i]!;
-  });
+  for (const f of files) {
+    entries[f.path] = f.bytes;
+  }
 
   // level 0 keeps output deterministic across fflate versions; mtime fixed by fflate default (0).
   const zip = zipSync(entries, { level: 0 });

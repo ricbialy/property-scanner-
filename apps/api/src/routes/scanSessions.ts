@@ -19,7 +19,9 @@ import {
   findScanSessionById,
   isEntitled,
   issueHandoffToken,
+  listUploadParts,
   markCaptureArtifactUploaded,
+  recordUploadPart,
   recordAuditEvent,
   redeemHandoffToken,
   transitionScanSession,
@@ -35,6 +37,11 @@ import { withIdempotency } from "../plugins/idempotency.js";
 import { sendProblem, sendValidationProblem } from "../problems.js";
 
 const HANDOFF_TTL_SECONDS = 15 * 60;
+
+/** Part objects live beside the final bundle; assembled at completion. */
+function partObjectKey(objectKey: string, partNumber: number): string {
+  return `${objectKey}.part${String(partNumber).padStart(5, "0")}`;
+}
 const UPLOAD_URL_TTL_SECONDS = 30 * 60;
 
 function serializeScanSession(row: ScanSessionRow) {
@@ -244,23 +251,107 @@ export function registerScanSessionRoutes(app: FastifyInstance, deps: AppDeps): 
       scanSessionId,
       captureId: parsed.data.captureId,
       objectKey,
-      contentType: parsed.data.contentType
+      contentType: parsed.data.contentType,
+      partCount: parsed.data.partCount
     });
-    const presigned = await deps.storage.createUploadUrl(
-      objectKey,
-      parsed.data.contentType,
-      UPLOAD_URL_TTL_SECONDS
-    );
-    const uploadUrl =
-      presigned ??
-      `${deps.env.API_BASE_URL}/v1/scan-sessions/${scanSessionId}/uploads/${artifact.id}/content`;
+
+    const localBase = `${deps.env.API_BASE_URL}/v1/scan-sessions/${scanSessionId}/uploads/${artifact.id}`;
+    const partCount = artifact.part_count;
+    let uploadUrl: string | null = null;
+    const partUploadUrls: Array<{ partNumber: number; uploadUrl: string }> = [];
+    if (partCount === 1) {
+      const presigned = await deps.storage.createUploadUrl(
+        objectKey,
+        parsed.data.contentType,
+        UPLOAD_URL_TTL_SECONDS
+      );
+      uploadUrl = presigned ?? `${localBase}/content`;
+    } else {
+      for (let n = 1; n <= partCount; n += 1) {
+        const presigned = await deps.storage.createUploadUrl(
+          partObjectKey(objectKey, n),
+          "application/octet-stream",
+          UPLOAD_URL_TTL_SECONDS
+        );
+        partUploadUrls.push({ partNumber: n, uploadUrl: presigned ?? `${localBase}/parts/${n}` });
+      }
+    }
     return reply.status(201).send({
       uploadId: artifact.id,
       uploadUrl,
+      partCount,
+      partUploadUrls,
       objectKey,
       expiresAt: new Date(Date.now() + UPLOAD_URL_TTL_SECONDS * 1000).toISOString()
     });
   });
+
+  // Resume support: which parts the server already holds.
+  app.get("/v1/scan-sessions/:scanSessionId/uploads/:uploadId", async (request, reply) => {
+    const tenant = await requireTenant(deps, request, reply, "member");
+    if (!tenant) return;
+    const { scanSessionId, uploadId } = request.params as {
+      scanSessionId: string;
+      uploadId: string;
+    };
+    const artifact = await findCaptureArtifact(deps.pool, tenant.organizationId, uploadId);
+    if (!artifact || artifact.scan_session_id !== scanSessionId) {
+      return sendProblem(reply, 404, "Upload not found");
+    }
+    const parts = await listUploadParts(deps.pool, tenant.organizationId, uploadId);
+    const received = parts.map((p) => p.part_number);
+    const missing: number[] = [];
+    for (let n = 1; n <= artifact.part_count; n += 1) {
+      if (!received.includes(n)) missing.push(n);
+    }
+    return {
+      uploadId: artifact.id,
+      status: artifact.status,
+      partCount: artifact.part_count,
+      receivedParts: received,
+      missingParts: missing
+    };
+  });
+
+  // Local-driver chunk target (fs storage only). S3 deployments PUT to the
+  // presigned per-part URLs; the part record is created at completion for them.
+  app.put(
+    "/v1/scan-sessions/:scanSessionId/uploads/:uploadId/parts/:partNumber",
+    async (request, reply) => {
+      const tenant = await requireTenant(deps, request, reply, "member");
+      if (!tenant) return;
+      const { scanSessionId, uploadId, partNumber } = request.params as {
+        scanSessionId: string;
+        uploadId: string;
+        partNumber: string;
+      };
+      const n = Number(partNumber);
+      const artifact = await findCaptureArtifact(deps.pool, tenant.organizationId, uploadId);
+      if (!artifact || artifact.scan_session_id !== scanSessionId) {
+        return sendProblem(reply, 404, "Upload not found");
+      }
+      if (!Number.isInteger(n) || n < 1 || n > artifact.part_count) {
+        return sendProblem(reply, 400, "Invalid part number");
+      }
+      const body = request.body;
+      if (!(body instanceof Buffer) || body.byteLength === 0) {
+        return sendProblem(reply, 400, "Binary request body required");
+      }
+      const sha256 = createHash("sha256").update(body).digest("hex");
+      await deps.storage.put(
+        partObjectKey(artifact.object_key, n),
+        new Uint8Array(body),
+        "application/octet-stream"
+      );
+      await recordUploadPart(deps.pool, tenant.organizationId, {
+        captureArtifactId: artifact.id,
+        partNumber: n,
+        byteSize: body.byteLength,
+        sha256
+      });
+      return reply.status(204).send();
+    }
+  );
 
   // Local-driver upload target (fs storage only). S3 deployments upload to the
   // presigned URL instead and never hit this route.
@@ -300,6 +391,41 @@ export function registerScanSessionRoutes(app: FastifyInstance, deps: AppDeps): 
       if (!artifact || artifact.scan_session_id !== scanSessionId) {
         return sendProblem(reply, 404, "Upload not found");
       }
+
+      // Chunked upload: verify every part is present, then assemble the final
+      // bundle object from the part objects before checksum verification.
+      if (artifact.part_count > 1 && !(await deps.storage.exists(artifact.object_key))) {
+        const parts = await listUploadParts(deps.pool, tenant.organizationId, uploadId);
+        const byNumber = new Map(parts.map((p) => [p.part_number, p]));
+        const missing: number[] = [];
+        for (let n = 1; n <= artifact.part_count; n += 1) {
+          if (!byNumber.has(n)) missing.push(n);
+        }
+        if (missing.length > 0) {
+          return sendProblem(
+            reply,
+            409,
+            "Upload incomplete",
+            `Missing parts: ${missing.join(", ")}`,
+            { missingParts: missing }
+          );
+        }
+        const buffers: Uint8Array[] = [];
+        for (let n = 1; n <= artifact.part_count; n += 1) {
+          const key = partObjectKey(artifact.object_key, n);
+          if (!(await deps.storage.exists(key))) {
+            return sendProblem(reply, 409, "Upload incomplete", `Part ${n} bytes are missing`);
+          }
+          buffers.push(await deps.storage.get(key));
+        }
+        const assembled = Buffer.concat(buffers.map((b) => Buffer.from(b)));
+        await deps.storage.put(
+          artifact.object_key,
+          new Uint8Array(assembled),
+          artifact.content_type
+        );
+      }
+
       if (!(await deps.storage.exists(artifact.object_key))) {
         return sendProblem(reply, 409, "Bundle bytes have not been uploaded");
       }

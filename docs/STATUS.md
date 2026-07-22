@@ -80,6 +80,27 @@ than the tests demonstrate.
 - **Exterior follow-ups**: iOS exterior photo capture UX, web facade panel,
   facade media attachment endpoints.
 
+## Phase 2 progress (native capture & durable upload)
+
+- **Resumable chunked uploads (server, tested)**: uploads register a part
+  count; parts are stored as sibling objects and recorded per part (idempotent
+  re-upload); `GET .../uploads/{id}` reports received/missing parts for resume;
+  completion refuses missing parts with the exact list, assembles the bundle,
+  and checksum-verifies the whole payload.
+- **iOS Phase 2 sources (not yet compiled — no macOS here)**: multiroom capture
+  model with RoomPlan `StructureBuilder` merge, room naming/deletion before
+  upload, bundle packager (manifest hashing real bytes, ZIPFoundation archive),
+  API client (handoff redeem, status transitions, upload registration/parts/
+  completion), and a resumable uploader that asks the server for missing parts
+  and uploads only those. Chunk math covered by XCTest.
+- **Import fixture matrix**: single-room, missing-wall (unclosable boundary →
+  finding, `not_processed`), and unsupported-schema variants added and tested.
+- **CI**: opt-in macOS simulator build+test job (`ENABLE_IOS_CI=true`).
+- **Remaining for Phase 2 exit**: compile and run on iPhone 15 Pro / iPad Pro,
+  capture UX polish (coaching, room connection prompts, review screen), opening
+  photo capture, background URLSession transfers, sanitized real-device bundle
+  checked in alongside the synthetic fixtures.
+
 ## Exterior roadmap (amendment, Phases 7A–8 — not started by design)
 
 Per `docs/PROPERTY_SCAN_EXTERIOR_FACADE_AMENDMENT.md` §19, exterior

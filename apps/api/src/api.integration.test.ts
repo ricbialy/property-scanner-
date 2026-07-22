@@ -522,3 +522,91 @@ describe("schedules", () => {
     expect(uuidSchema.safeParse(openings.json().revisionId).success).toBe(true);
   });
 });
+
+describe("resumable chunked uploads", () => {
+  it("resumes an interrupted multi-part upload and assembles the bundle", async () => {
+    const orgId = await createOrg("judy", "Judy Field Services");
+    const { propertyId, floorId } = await createPropertyAndFloor("judy", orgId);
+    const sessionRes = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/scan-sessions",
+      headers: { ...asUser("judy", orgId), "idempotency-key": "judy-1" },
+      payload: { propertyId, floorId, requestedOutputs: ["normalized_json"] }
+    });
+    const sessionId = sessionRes.json().id;
+
+    const { manifest, zip } = buildFixtureBundle(sessionId);
+    const sha256 = createHash("sha256").update(zip).digest("hex");
+    const partSize = Math.ceil(zip.byteLength / 3);
+    const parts = [
+      zip.slice(0, partSize),
+      zip.slice(partSize, 2 * partSize),
+      zip.slice(2 * partSize)
+    ];
+
+    const uploadRes = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/scan-sessions/${sessionId}/uploads`,
+      headers: asUser("judy", orgId),
+      payload: {
+        captureId: manifest.captureId,
+        byteSize: zip.byteLength,
+        contentType: "application/zip",
+        partCount: 3
+      }
+    });
+    expect(uploadRes.statusCode).toBe(201);
+    const upload = uploadRes.json();
+    expect(upload.partCount).toBe(3);
+    expect(upload.partUploadUrls).toHaveLength(3);
+    expect(upload.uploadUrl).toBeNull();
+    const uploadId = upload.uploadId;
+
+    const putPart = (n: number, data: Uint8Array) =>
+      ctx.app.inject({
+        method: "PUT",
+        url: `/v1/scan-sessions/${sessionId}/uploads/${uploadId}/parts/${n}`,
+        headers: { ...asUser("judy", orgId), "content-type": "application/octet-stream" },
+        payload: Buffer.from(data)
+      });
+
+    // Upload only the middle part, then "lose connectivity".
+    expect((await putPart(2, parts[1]!)).statusCode).toBe(204);
+
+    // Resume: server reports exactly which parts are missing.
+    const statusRes = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/scan-sessions/${sessionId}/uploads/${uploadId}`,
+      headers: asUser("judy", orgId)
+    });
+    expect(statusRes.json().receivedParts).toEqual([2]);
+    expect(statusRes.json().missingParts).toEqual([1, 3]);
+
+    // Premature completion is refused with the missing parts listed.
+    const early = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/scan-sessions/${sessionId}/uploads/${uploadId}/complete`,
+      headers: asUser("judy", orgId),
+      payload: { sha256, byteSize: zip.byteLength }
+    });
+    expect(early.statusCode).toBe(409);
+    expect(early.json().missingParts).toEqual([1, 3]);
+
+    // Resume the remaining parts; re-uploading part 2 is idempotent.
+    expect((await putPart(1, parts[0]!)).statusCode).toBe(204);
+    expect((await putPart(2, parts[1]!)).statusCode).toBe(204);
+    expect((await putPart(3, parts[2]!)).statusCode).toBe(204);
+
+    // Out-of-range part numbers are rejected.
+    expect((await putPart(4, parts[0]!)).statusCode).toBe(400);
+
+    const complete = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/scan-sessions/${sessionId}/uploads/${uploadId}/complete`,
+      headers: asUser("judy", orgId),
+      payload: { sha256, byteSize: zip.byteLength }
+    });
+    expect(complete.statusCode).toBe(200);
+    expect(complete.json().status).toBe("uploaded");
+  });
+});

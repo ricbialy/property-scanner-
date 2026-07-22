@@ -10,7 +10,16 @@ export interface CaptureArtifactRow {
   byte_size: string | number | null;
   sha256: string | null;
   content_type: string;
+  part_count: number;
   status: "pending" | "uploaded" | "verified" | "rejected";
+}
+
+export interface UploadPartRow {
+  id: string;
+  capture_artifact_id: string;
+  part_number: number;
+  byte_size: string | number;
+  sha256: string;
 }
 
 /**
@@ -20,11 +29,17 @@ export interface CaptureArtifactRow {
 export async function createOrGetCaptureArtifact(
   db: Queryable,
   organizationId: string,
-  input: { scanSessionId: string; captureId: string; objectKey: string; contentType: string }
+  input: {
+    scanSessionId: string;
+    captureId: string;
+    objectKey: string;
+    contentType: string;
+    partCount?: number;
+  }
 ): Promise<CaptureArtifactRow> {
   const { rows } = await db.query(
-    `insert into capture_artifacts (id, organization_id, scan_session_id, capture_id, object_key, content_type)
-     values ($1, $2, $3, $4, $5, $6)
+    `insert into capture_artifacts (id, organization_id, scan_session_id, capture_id, object_key, content_type, part_count)
+     values ($1, $2, $3, $4, $5, $6, $7)
      on conflict (scan_session_id, capture_id) do update set updated_at = now()
      returning *`,
     [
@@ -33,10 +48,47 @@ export async function createOrGetCaptureArtifact(
       input.scanSessionId,
       input.captureId,
       input.objectKey,
-      input.contentType
+      input.contentType,
+      input.partCount ?? 1
     ]
   );
   return rows[0] as CaptureArtifactRow;
+}
+
+/** Record a received part. Re-uploading the same part number is idempotent. */
+export async function recordUploadPart(
+  db: Queryable,
+  organizationId: string,
+  input: { captureArtifactId: string; partNumber: number; byteSize: number; sha256: string }
+): Promise<void> {
+  await db.query(
+    `insert into capture_upload_parts (id, organization_id, capture_artifact_id, part_number, byte_size, sha256)
+     values ($1, $2, $3, $4, $5, $6)
+     on conflict (capture_artifact_id, part_number)
+     do update set byte_size = $5, sha256 = $6, updated_at = now()`,
+    [
+      uuidv7(),
+      organizationId,
+      input.captureArtifactId,
+      input.partNumber,
+      input.byteSize,
+      input.sha256
+    ]
+  );
+}
+
+export async function listUploadParts(
+  db: Queryable,
+  organizationId: string,
+  captureArtifactId: string
+): Promise<UploadPartRow[]> {
+  const { rows } = await db.query(
+    `select * from capture_upload_parts
+     where capture_artifact_id = $1 and organization_id = $2
+     order by part_number`,
+    [captureArtifactId, organizationId]
+  );
+  return rows as UploadPartRow[];
 }
 
 export async function findCaptureArtifact(
