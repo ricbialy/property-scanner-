@@ -16,3 +16,4 @@ export * from "./repositories/outbox.js";
 export * from "./repositories/facades.js";
 export * from "./repositories/measurements.js";
 export * from "./repositories/entitlements.js";
+export * from "./repositories/media.js";

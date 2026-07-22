@@ -101,6 +101,26 @@ than the tests demonstrate.
   photo capture, background URLSession transfers, sanitized real-device bundle
   checked in alongside the synthetic fixtures.
 
+## Phase 3 remainder (this iteration)
+
+- **Media pipeline (tested)**: register/upload/complete with checksum and
+  MIME-signature validation (JPEG/PNG/HEIC magic bytes; spoofed content types
+  rejected and the media marked rejected), pixel dimensions from JPEG SOF/PNG
+  IHDR, JPEG Exif APP1 removed before media becomes ready (whole-segment drop —
+  ADR trade-off documented in code; HEIC metadata deferred to the processing
+  worker as `unstripped_pending`), authorized downloads (presigned redirect on
+  S3, streamed behind auth on fs), and photo links to openings with ordering.
+- **Duplicate-opening detection (tested)**: near-coincident same-type openings
+  produce a `duplicate_opening_candidate` finding for human review — both
+  observations preserved, never auto-merged.
+- **OpenAPI 3.1 contract** (`docs/api/openapi.yaml`) verified by an integration
+  test: every documented operation must exist in the router; public routes are
+  allowlisted. Deferred: request/response schema validation generated from the
+  document.
+- Still open from Phase 3: thumbnails (needs an image toolchain in the worker),
+  HEIC metadata handling, richer topology validation (overlaps/self-
+  intersections).
+
 ## Exterior roadmap (amendment, Phases 7A–8 — not started by design)
 
 Per `docs/PROPERTY_SCAN_EXTERIOR_FACADE_AMENDMENT.md` §19, exterior

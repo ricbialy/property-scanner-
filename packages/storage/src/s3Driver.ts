@@ -61,6 +61,12 @@ export function createS3Storage(options: S3StorageOptions): ObjectStorage {
         new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
         { expiresIn: expiresSeconds }
       );
+    },
+    async createDownloadUrl(key, expiresSeconds) {
+      assertValidObjectKey(key);
+      return getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), {
+        expiresIn: expiresSeconds
+      });
     }
   };
 }

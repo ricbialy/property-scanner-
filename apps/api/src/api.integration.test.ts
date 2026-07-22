@@ -11,6 +11,7 @@ import {
 import { GEOMETRY_SCHEMA_VERSION, uuidSchema } from "@propertyscan/contracts";
 
 import { asUser, createTestApp, type TestApp } from "./testSupport.js";
+import { buildJpeg } from "./lib/imageFixtures.js";
 
 let ctx: TestApp;
 
@@ -608,5 +609,143 @@ describe("resumable chunked uploads", () => {
     });
     expect(complete.statusCode).toBe(200);
     expect(complete.json().status).toBe("uploaded");
+  });
+});
+
+describe("media pipeline", () => {
+  it("uploads, validates, strips JPEG EXIF, links to an opening, and serves downloads", async () => {
+    const orgId = await createOrg("kira", "Kira Media Co");
+    const { propertyId, floorId } = await createPropertyAndFloor("kira", orgId);
+
+    // A plan revision with one relational opening to link photos to.
+    const session = await createScanSession(ctx.pool, orgId, {
+      propertyId,
+      floorId,
+      requestedOutputs: ["normalized_json"],
+      externalReferences: []
+    });
+    const openingId = "0198bbbb-0000-7000-8000-000000000001";
+    await withTransaction(ctx.pool, async (tx) => {
+      const { revision } = await createPlanWithInitialRevision(tx, orgId, {
+        floorId,
+        scanSessionId: session.id,
+        reason: "media test revision",
+        geometrySchemaVersion: GEOMETRY_SCHEMA_VERSION,
+        buildPayload: (planId, revisionId) => ({
+          schemaVersion: GEOMETRY_SCHEMA_VERSION,
+          planId,
+          revisionId,
+          coordinateConventions: {
+            units: "meters",
+            plan: "x-z-projection",
+            winding: "ccw",
+            angles: "radians"
+          },
+          rooms: [],
+          walls: [],
+          openings: [],
+          validationFindings: []
+        })
+      });
+      await tx.query(
+        `insert into openings (id, organization_id, plan_revision_id, opening_type, room_ids)
+         values ($1, $2, $3, 'window', '[]'::jsonb)`,
+        [openingId, orgId, revision.id]
+      );
+    });
+
+    const jpegWithExif = Buffer.from(buildJpeg({ withExif: true, withXmp: true }));
+    const uploadedSha = createHash("sha256").update(jpegWithExif).digest("hex");
+
+    // Register + upload bytes.
+    const reg = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/media/uploads",
+      headers: asUser("kira", orgId),
+      payload: { byteSize: jpegWithExif.byteLength, contentType: "image/jpeg" }
+    });
+    expect(reg.statusCode).toBe(201);
+    const { mediaId } = reg.json();
+    const put = await ctx.app.inject({
+      method: "PUT",
+      url: `/v1/media/uploads/${mediaId}/content`,
+      headers: { ...asUser("kira", orgId), "content-type": "image/jpeg" },
+      payload: jpegWithExif
+    });
+    expect(put.statusCode).toBe(204);
+
+    // Complete: EXIF gets stripped, dimensions recorded.
+    const complete = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/media/uploads/${mediaId}/complete`,
+      headers: asUser("kira", orgId),
+      payload: { sha256: uploadedSha, byteSize: jpegWithExif.byteLength }
+    });
+    expect(complete.statusCode).toBe(200);
+    const media = complete.json();
+    expect(media.status).toBe("ready");
+    expect(media.exifPolicy).toBe("exif_app1_stripped");
+    expect(media.widthPx).toBe(2);
+    expect(media.heightPx).toBe(3);
+    // Stored sha differs from uploaded sha because EXIF was removed.
+    expect(media.sha256).not.toBe(uploadedSha);
+
+    // Download serves the stripped bytes (no EXIF payload marker).
+    const download = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/media/${mediaId}/content`,
+      headers: asUser("kira", orgId)
+    });
+    expect(download.statusCode).toBe(200);
+    expect(download.headers["content-type"]).toContain("image/jpeg");
+    expect(download.rawPayload.toString("hex")).not.toContain("deadbeef");
+
+    // Content-type spoofing is rejected: declared PNG, actual JPEG bytes.
+    const spoofReg = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/media/uploads",
+      headers: asUser("kira", orgId),
+      payload: { byteSize: jpegWithExif.byteLength, contentType: "image/png" }
+    });
+    const spoofId = spoofReg.json().mediaId;
+    await ctx.app.inject({
+      method: "PUT",
+      url: `/v1/media/uploads/${spoofId}/content`,
+      headers: { ...asUser("kira", orgId), "content-type": "image/png" },
+      payload: jpegWithExif
+    });
+    const spoofComplete = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/media/uploads/${spoofId}/complete`,
+      headers: asUser("kira", orgId),
+      payload: { sha256: uploadedSha, byteSize: jpegWithExif.byteLength }
+    });
+    expect(spoofComplete.statusCode).toBe(422);
+
+    // Link to the opening and list with a download URL.
+    const link = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/openings/${openingId}/media-links`,
+      headers: asUser("kira", orgId),
+      payload: { mediaId, position: 0 }
+    });
+    expect(link.statusCode).toBe(201);
+
+    const list = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/openings/${openingId}/media-links`,
+      headers: asUser("kira", orgId)
+    });
+    expect(list.json().data).toHaveLength(1);
+    expect(list.json().data[0].downloadUrl).toContain(`/v1/media/${mediaId}/content`);
+
+    // Cross-tenant media access is denied.
+    const otherOrg = await createOrg("liam", "Liam Co");
+    const cross = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/media/${mediaId}/content`,
+      headers: asUser("liam", otherOrg)
+    });
+    expect(cross.statusCode).toBe(404);
   });
 });

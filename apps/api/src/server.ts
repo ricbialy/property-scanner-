@@ -10,6 +10,7 @@ import { registerPlanRoutes } from "./routes/plans.js";
 import { registerPropertyRoutes } from "./routes/properties.js";
 import { registerScanSessionRoutes } from "./routes/scanSessions.js";
 import { registerExteriorRoutes } from "./routes/exterior.js";
+import { registerMediaRoutes } from "./routes/media.js";
 
 export function buildServer(deps: AppDeps): FastifyInstance {
   // Cast: pino's Logger is runtime-compatible with FastifyBaseLogger but their
@@ -23,7 +24,7 @@ export function buildServer(deps: AppDeps): FastifyInstance {
 
   // Raw binary bodies for local bundle uploads (fs storage driver).
   app.addContentTypeParser(
-    ["application/zip", "application/octet-stream"],
+    ["application/zip", "application/octet-stream", "image/jpeg", "image/png", "image/heic"],
     { parseAs: "buffer", bodyLimit: deps.env.UPLOAD_MAX_BYTES },
     (_request, payload, done) => done(null, payload)
   );
@@ -45,6 +46,7 @@ export function buildServer(deps: AppDeps): FastifyInstance {
   registerScanSessionRoutes(app, deps);
   registerPlanRoutes(app, deps);
   registerExteriorRoutes(app, deps);
+  registerMediaRoutes(app, deps);
 
   return app;
 }

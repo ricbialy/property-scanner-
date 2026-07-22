@@ -43,7 +43,14 @@ same key+body return the stored response; same key with different body → 422.
 | `POST /v1/facades/{id}/openings` · `GET .../openings`                    | exterior openings (window/door/garage_door/vent/other)                                                                       |
 | `POST /v1/measurements`                                                  | manual/laser measurement with provenance; `fieldVerified: true` requires a laser/manual source and records verifier identity |
 
-A formal OpenAPI 3.1 document generated from these routes is planned for
-Phase 3, when the plan/opening/schedule surface stabilizes; until then this
-table plus `packages/contracts` zod schemas are the request/response source of
-truth.
+The HTTP contract is formalized in [`openapi.yaml`](./openapi.yaml) (OpenAPI
+3.1) and verified against the running router by
+`apps/api/src/openapi.contract.integration.test.ts` — every documented
+operation must be routed, and public (unauthenticated) access is allowlisted.
+Request/response field shapes remain authoritatively defined by the zod
+schemas in `packages/contracts`.
+
+Media endpoints (Phase 3): registration → byte upload (presigned or local) →
+completion with checksum + MIME-signature validation, JPEG Exif APP1 removal,
+and pixel dimensions; authorized downloads via short-lived signed URLs (S3) or
+API streaming (fs); photo links to openings ordered by position.

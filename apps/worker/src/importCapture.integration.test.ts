@@ -319,3 +319,33 @@ describe("import fixture matrix (spec §15.1)", () => {
     expect(run.rows[0].status).toBe("failed");
   });
 });
+
+describe("duplicate opening detection", () => {
+  it("flags coincident same-type openings for review without auto-merging", async () => {
+    const fixture = await prepareSession({ variant: "duplicate-opening" });
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("needs_review");
+
+    const planRows = await pool.query("select * from plans where id = $1", [session!.plan_id]);
+    const revision = await findPlanRevision(
+      pool,
+      fixture.organizationId,
+      planRows.rows[0].id,
+      planRows.rows[0].current_revision_id
+    );
+    const payload = revision!.payload;
+
+    // Both observations are preserved — resolution belongs to human review.
+    const doors = payload.openings.filter((o) => o.type === "door");
+    expect(doors).toHaveLength(2);
+
+    const duplicateFindings = payload.validationFindings.filter(
+      (f) => f.code === "duplicate_opening_candidate"
+    );
+    expect(duplicateFindings).toHaveLength(1);
+    expect(duplicateFindings[0]!.message).toContain("5f3a1b2c-3001");
+    expect(duplicateFindings[0]!.message).toContain("5f3a1b2c-3002");
+  });
+});

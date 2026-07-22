@@ -1,0 +1,274 @@
+openapi: 3.1.0
+info:
+  title: Property Scan API
+  version: "0.1"
+  description: >-
+    Multi-tenant construction-capture API. Canonical geometry is metric; imperial
+    values are display-only. Measurements are preliminary estimates unless marked
+    field_verified. Request/response field shapes are authoritatively defined by
+    the zod schemas in packages/contracts; this document is the HTTP contract
+    (paths, methods, auth, status codes) and is verified against the running
+    router by a contract test.
+servers:
+  - url: "{apiBaseUrl}"
+    variables:
+      apiBaseUrl:
+        default: http://localhost:4000
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Clerk session JWT (production) or dev_<userId> token (development).
+  parameters:
+    organizationHeader:
+      name: X-Organization-Id
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+      description: >-
+        Selects among the caller's organizations; validated server-side against
+        membership. Never authorization by itself.
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 200 }
+  responses:
+    Problem:
+      description: RFC 9457 problem
+      content:
+        application/problem+json:
+          schema:
+            type: object
+            required: [title, status]
+            properties:
+              type: { type: string }
+              title: { type: string }
+              status: { type: integer }
+              detail: { type: string }
+paths:
+  /health/live:
+    get:
+      security: []
+      summary: Liveness
+      responses: { "200": { description: OK } }
+  /health/ready:
+    get:
+      security: []
+      summary: Readiness (checks database)
+      responses:
+        "200": { description: Ready }
+        "503": { description: Dependencies unavailable }
+  /v1/organizations:
+    post:
+      summary: Create organization; caller becomes owner
+      responses:
+        "201": { description: Created }
+        "401": { $ref: "#/components/responses/Problem" }
+    get:
+      summary: Organizations the caller belongs to
+      responses: { "200": { description: OK } }
+  /v1/properties:
+    post:
+      summary: Create property
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "201": { description: Created }
+        "400": { $ref: "#/components/responses/Problem" }
+    get:
+      summary: List properties (cursor pagination)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
+  /v1/properties/{propertyId}:
+    get:
+      summary: Get property
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/Problem" }
+  /v1/properties/{propertyId}/floors:
+    post:
+      summary: Add a floor
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "201": { description: Created } }
+  /v1/scan-sessions:
+    post:
+      summary: >-
+        Create scan session (idempotent). Optional captureMode defaults to
+        interior_roomplan; non-interior modes require the matching tenant
+        entitlement (403 otherwise).
+      parameters:
+        - { $ref: "#/components/parameters/organizationHeader" }
+        - { $ref: "#/components/parameters/idempotencyKey" }
+      responses:
+        "201": { description: Created (or idempotent replay) }
+        "403": { $ref: "#/components/responses/Problem" }
+        "422": { description: Idempotency-Key reused with different body }
+  /v1/scan-sessions/{scanSessionId}:
+    get:
+      summary: Session state incl. planId/failureReason
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/Problem" }
+  /v1/scan-sessions/{scanSessionId}/status:
+    post:
+      summary: Device-reported state-machine transition ({from,to}; validated)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: Transitioned }
+        "409": { description: Stale transition }
+        "422": { description: Illegal transition }
+  /v1/scan-sessions/{scanSessionId}/handoff-token:
+    post:
+      summary: Issue single-use deep-link token (15 min TTL; hash-only storage)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "201": { description: Token issued (returned exactly once) } }
+  /v1/scan-handoff/redeem:
+    post:
+      security: []
+      summary: Redeem a handoff token (single use; token is the credential)
+      responses:
+        "200": { description: Capture-scoped session metadata }
+        "404": { description: Invalid, expired, or already used }
+  /v1/scan-sessions/{scanSessionId}/uploads:
+    post:
+      summary: >-
+        Register capture bundle upload (idempotent per captureId). partCount > 1
+        enables chunked resumable upload; returns per-part URLs.
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "201": { description: Upload slot }
+        "413": { description: Exceeds size limit }
+  /v1/scan-sessions/{scanSessionId}/uploads/{uploadId}:
+    get:
+      summary: Resume state — received and missing part numbers
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
+  /v1/scan-sessions/{scanSessionId}/uploads/{uploadId}/content:
+    put:
+      summary: Single-object byte upload (local storage driver only)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "204": { description: Stored } }
+  /v1/scan-sessions/{scanSessionId}/uploads/{uploadId}/parts/{partNumber}:
+    put:
+      summary: Chunk upload, idempotent per part (local storage driver only)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "204": { description: Part stored }
+        "400": { description: Invalid part number }
+  /v1/scan-sessions/{scanSessionId}/uploads/{uploadId}/complete:
+    post:
+      summary: >-
+        Verify SHA-256/byte size; for chunked uploads, assemble parts first.
+        Missing parts are refused with the exact list.
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: Verified }
+        "409": { description: Bytes or parts missing }
+        "422": { description: Checksum mismatch }
+  /v1/scan-sessions/{scanSessionId}/complete:
+    post:
+      summary: Transition to processing; create import run; enqueue idempotent import job
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: Processing }
+        "409": { description: Not ready or no uploaded bundle }
+  /v1/plans/{planId}:
+    get:
+      summary: Plan + current revision (normalized geometry; underivable fields are "not_processed")
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/Problem" }
+  /v1/plans/{planId}/revisions/{revisionId}:
+    get:
+      summary: Immutable plan revision
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
+  /v1/plans/{planId}/openings:
+    get:
+      summary: Openings of the current revision
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
+  /v1/plans/{planId}/schedules/windows:
+    get:
+      summary: Window schedule (keyed entries, room names, display units, disclaimer)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
+  /v1/plans/{planId}/schedules/doors:
+    get:
+      summary: Door schedule
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
+  /v1/properties/{propertyId}/facades:
+    post:
+      summary: Create facade (requires exterior_capture entitlement)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "201": { description: Created }
+        "403": { description: Not entitled }
+    get:
+      summary: List facades (requires exterior_capture entitlement)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
+  /v1/facades/{facadeId}/openings:
+    post:
+      summary: Create exterior opening (requires exterior_capture entitlement)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "201": { description: Created } }
+    get:
+      summary: List exterior openings
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
+  /v1/measurements:
+    post:
+      summary: >-
+        Record measurement with provenance. fieldVerified requires manual/laser
+        source; verifier identity and timestamp recorded; history append-only.
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "201": { description: Recorded }
+        "404": { $ref: "#/components/responses/Problem" }
+  /v1/media/uploads:
+    post:
+      summary: Register media upload (jpeg/png/heic); server-chosen object key
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "201": { description: Upload slot }
+        "413": { description: Exceeds size limit }
+  /v1/media/uploads/{mediaId}/content:
+    put:
+      summary: Media byte upload (local storage driver only)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "204": { description: Stored } }
+  /v1/media/uploads/{mediaId}/complete:
+    post:
+      summary: >-
+        Validate media — checksum, MIME signature vs declared type, dimensions;
+        JPEG Exif APP1 removed before the object becomes ready.
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: Ready }
+        "409": { description: Bytes missing }
+        "422": { description: Checksum or content-type mismatch (media rejected) }
+  /v1/media/{mediaId}/content:
+    get:
+      summary: Authorized download — presigned redirect (S3) or direct stream (fs)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses:
+        "200": { description: Bytes }
+        "302": { description: Redirect to short-lived signed URL }
+        "404": { $ref: "#/components/responses/Problem" }
+  /v1/openings/{openingId}/media-links:
+    post:
+      summary: Link a ready media item to an opening (ordered by position)
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "201": { description: Linked } }
+    get:
+      summary: List opening photos with short-lived download URLs
+      parameters: [{ $ref: "#/components/parameters/organizationHeader" }]
+      responses: { "200": { description: OK } }
