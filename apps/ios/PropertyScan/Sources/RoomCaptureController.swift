@@ -27,6 +27,18 @@ final class RoomCaptureController: NSObject, ObservableObject, RoomCaptureViewDe
 
     private weak var captureView: RoomCaptureView?
 
+    override init() {
+        super.init()
+    }
+
+    // RoomCaptureViewDelegate inherits NSCoding; the controller is never
+    // archived, so these are inert conformance stubs.
+    nonisolated func encode(with coder: NSCoder) {}
+
+    nonisolated required init?(coder: NSCoder) {
+        nil
+    }
+
     func attach(view: RoomCaptureView) {
         captureView = view
     }

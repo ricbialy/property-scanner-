@@ -112,6 +112,7 @@ struct PropertyScanAPIClient {
     // MARK: Plumbing
 
     private struct EmptyReply: Decodable {
+        init() {}
         init(from decoder: Decoder) throws {}
     }
 
@@ -120,12 +121,18 @@ struct PropertyScanAPIClient {
         request.setValue(organizationId, forHTTPHeaderField: "X-Organization-Id")
     }
 
+    private func endpoint(_ path: String) -> URL {
+        // appendingPathComponent percent-escapes a leading slash; trim it so
+        // "/v1/..." joins cleanly onto the base URL.
+        baseURL.appendingPathComponent(path.hasPrefix("/") ? String(path.dropFirst()) : path)
+    }
+
     private func post<T: Decodable>(
         path: String,
         body: [String: Any],
         authorized: Bool = true
     ) async throws -> T {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        var request = URLRequest(url: endpoint(path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if authorized { applyAuth(&request) }
@@ -135,7 +142,7 @@ struct PropertyScanAPIClient {
     }
 
     private func get<T: Decodable>(path: String) async throws -> T {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        var request = URLRequest(url: endpoint(path))
         applyAuth(&request)
         let (data, response) = try await session.data(for: request)
         return try decode(data: data, response: response)
