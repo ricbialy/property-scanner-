@@ -634,6 +634,71 @@ describe("resumable chunked uploads", () => {
     expect(complete.statusCode).toBe(200);
     expect(complete.json().status).toBe("uploaded");
   });
+
+  it("completes a chunked upload whose parts went directly to storage (presigned path)", async () => {
+    // On S3 the client PUTs each part to a presigned URL and the API never
+    // sees them — no capture_upload_parts rows exist. Completion and resume
+    // status must treat the stored part objects as the source of truth.
+    const orgId = await createOrg("leo", "Leo Presigned Ltd");
+    const { propertyId, floorId } = await createPropertyAndFloor("leo", orgId);
+    const sessionRes = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/scan-sessions",
+      headers: { ...asUser("leo", orgId), "idempotency-key": "leo-1" },
+      payload: { propertyId, floorId, requestedOutputs: ["normalized_json"] }
+    });
+    const sessionId = sessionRes.json().id;
+
+    const { manifest, zip } = buildFixtureBundle(sessionId);
+    const sha256 = createHash("sha256").update(zip).digest("hex");
+    const partSize = Math.ceil(zip.byteLength / 2);
+    const parts = [zip.slice(0, partSize), zip.slice(partSize)];
+
+    const uploadRes = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/scan-sessions/${sessionId}/uploads`,
+      headers: asUser("leo", orgId),
+      payload: {
+        captureId: manifest.captureId,
+        byteSize: zip.byteLength,
+        contentType: "application/zip",
+        partCount: 2
+      }
+    });
+    expect(uploadRes.statusCode).toBe(201);
+    const upload = uploadRes.json();
+
+    // Simulate presigned PUTs: write part objects straight into storage.
+    const partKey = (n: number) => `${upload.objectKey}.part${String(n).padStart(5, "0")}`;
+    await ctx.storage.put(partKey(1), parts[0]!, "application/octet-stream");
+
+    // Resume status sees the directly-stored part without a DB row.
+    const statusRes = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/scan-sessions/${sessionId}/uploads/${upload.uploadId}`,
+      headers: asUser("leo", orgId)
+    });
+    expect(statusRes.json().receivedParts).toEqual([1]);
+    expect(statusRes.json().missingParts).toEqual([2]);
+
+    await ctx.storage.put(partKey(2), parts[1]!, "application/octet-stream");
+
+    const complete = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/scan-sessions/${sessionId}/uploads/${upload.uploadId}/complete`,
+      headers: asUser("leo", orgId),
+      payload: { sha256, byteSize: zip.byteLength }
+    });
+    expect(complete.statusCode).toBe(200);
+    expect(complete.json().status).toBe("uploaded");
+
+    // Completion backfills the part audit rows the local route would have written.
+    const partRows = await ctx.pool.query(
+      "select part_number from capture_upload_parts where capture_artifact_id = $1 order by part_number",
+      [upload.uploadId]
+    );
+    expect(partRows.rows.map((r) => r.part_number)).toEqual([1, 2]);
+  });
 });
 
 describe("media pipeline", () => {

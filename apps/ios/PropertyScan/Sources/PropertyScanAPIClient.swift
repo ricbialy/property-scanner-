@@ -82,8 +82,12 @@ struct PropertyScanAPIClient {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        // Local API routes need auth headers; presigned URLs ignore them.
-        applyAuth(&request)
+        // Only API routes get app auth headers. A presigned storage URL is
+        // authenticated by its query string alone — S3/MinIO rejects requests
+        // that also carry a conflicting Authorization header.
+        if targetsAPI(url) {
+            applyAuth(&request)
+        }
         let (_, response) = try await session.upload(for: request, from: data)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw APIError.http(status: (response as? HTTPURLResponse)?.statusCode ?? -1, title: nil)
@@ -114,6 +118,10 @@ struct PropertyScanAPIClient {
     private struct EmptyReply: Decodable {
         init() {}
         init(from decoder: Decoder) throws {}
+    }
+
+    private func targetsAPI(_ url: URL) -> Bool {
+        url.host == baseURL.host && url.port == baseURL.port && url.scheme == baseURL.scheme
     }
 
     private func applyAuth(_ request: inout URLRequest) {

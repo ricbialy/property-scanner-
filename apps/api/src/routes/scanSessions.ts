@@ -44,6 +44,31 @@ function partObjectKey(objectKey: string, partNumber: number): string {
 }
 const UPLOAD_URL_TTL_SECONDS = 30 * 60;
 
+/**
+ * Which parts the server holds. DB rows are written by the local part route,
+ * but presigned (S3) uploads PUT part objects directly to storage and never
+ * hit the API — so parts without a DB row are probed in object storage before
+ * being declared missing.
+ */
+async function resolveUploadParts(
+  deps: AppDeps,
+  organizationId: string,
+  artifact: { id: string; object_key: string; part_count: number }
+): Promise<{ received: number[]; missing: number[] }> {
+  const rows = await listUploadParts(deps.pool, organizationId, artifact.id);
+  const present = new Set(rows.map((p) => p.part_number));
+  const missing: number[] = [];
+  for (let n = 1; n <= artifact.part_count; n += 1) {
+    if (present.has(n)) continue;
+    if (await deps.storage.exists(partObjectKey(artifact.object_key, n))) {
+      present.add(n);
+    } else {
+      missing.push(n);
+    }
+  }
+  return { received: [...present].sort((a, b) => a - b), missing };
+}
+
 function serializeScanSession(row: ScanSessionRow) {
   return {
     id: row.id,
@@ -298,12 +323,7 @@ export function registerScanSessionRoutes(app: FastifyInstance, deps: AppDeps): 
     if (!artifact || artifact.scan_session_id !== scanSessionId) {
       return sendProblem(reply, 404, "Upload not found");
     }
-    const parts = await listUploadParts(deps.pool, tenant.organizationId, uploadId);
-    const received = parts.map((p) => p.part_number);
-    const missing: number[] = [];
-    for (let n = 1; n <= artifact.part_count; n += 1) {
-      if (!received.includes(n)) missing.push(n);
-    }
+    const { received, missing } = await resolveUploadParts(deps, tenant.organizationId, artifact);
     return {
       uploadId: artifact.id,
       status: artifact.status,
@@ -397,10 +417,7 @@ export function registerScanSessionRoutes(app: FastifyInstance, deps: AppDeps): 
       if (artifact.part_count > 1 && !(await deps.storage.exists(artifact.object_key))) {
         const parts = await listUploadParts(deps.pool, tenant.organizationId, uploadId);
         const byNumber = new Map(parts.map((p) => [p.part_number, p]));
-        const missing: number[] = [];
-        for (let n = 1; n <= artifact.part_count; n += 1) {
-          if (!byNumber.has(n)) missing.push(n);
-        }
+        const { missing } = await resolveUploadParts(deps, tenant.organizationId, artifact);
         if (missing.length > 0) {
           return sendProblem(
             reply,
@@ -416,7 +433,19 @@ export function registerScanSessionRoutes(app: FastifyInstance, deps: AppDeps): 
           if (!(await deps.storage.exists(key))) {
             return sendProblem(reply, 409, "Upload incomplete", `Part ${n} bytes are missing`);
           }
-          buffers.push(await deps.storage.get(key));
+          const data = await deps.storage.get(key);
+          buffers.push(data);
+          // Presigned uploads bypass the local part route, so their part
+          // records are created here at completion (matching the audit trail
+          // the local driver builds incrementally).
+          if (!byNumber.has(n)) {
+            await recordUploadPart(deps.pool, tenant.organizationId, {
+              captureArtifactId: artifact.id,
+              partNumber: n,
+              byteSize: data.byteLength,
+              sha256: createHash("sha256").update(data).digest("hex")
+            });
+          }
         }
         const assembled = Buffer.concat(buffers.map((b) => Buffer.from(b)));
         await deps.storage.put(
