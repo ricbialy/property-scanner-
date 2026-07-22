@@ -20,7 +20,11 @@ import {
   transitionScanSession
 } from "@propertyscan/database";
 import { createFsStorage, type ObjectStorage } from "@propertyscan/storage";
-import { buildFixtureBundle, TWO_ROOM_FIXTURE } from "@propertyscan/roomplan-fixtures";
+import {
+  buildFixtureBundle,
+  TWO_ROOM_FIXTURE,
+  type FixtureOptions
+} from "@propertyscan/roomplan-fixtures";
 import { NOT_PROCESSED } from "@propertyscan/contracts";
 import { createLogger } from "@propertyscan/observability";
 
@@ -52,7 +56,7 @@ interface SessionFixture {
   jobKey: string;
 }
 
-async function prepareSession(options?: { corruptChecksums?: boolean }): Promise<SessionFixture> {
+async function prepareSession(options?: FixtureOptions): Promise<SessionFixture> {
   const org = await createOrganizationWithOwner(pool, {
     name: `Worker Org ${Math.random().toString(36).slice(2, 8)}`,
     ownerUserId: "user_worker_test"
@@ -71,9 +75,7 @@ async function prepareSession(options?: { corruptChecksums?: boolean }): Promise
     externalReferences: []
   });
 
-  const { zip } = buildFixtureBundle(session.id, {
-    ...(options?.corruptChecksums ? { corruptChecksums: true } : {})
-  });
+  const { zip } = buildFixtureBundle(session.id, options ?? {});
   const sha256 = createHash("sha256").update(zip).digest("hex");
   const objectKey = `orgs/${org.id}/scans/${session.id}/captures/${TWO_ROOM_FIXTURE.captureId}/bundle.zip`;
   await storage.put(objectKey, zip, "application/zip");
@@ -260,5 +262,60 @@ describe("import_capture job", () => {
       [fixture.organizationId]
     );
     expect(outbox.rows.map((r) => r.event_type)).toContain("scan.failed");
+  });
+});
+
+describe("import fixture matrix (spec §15.1)", () => {
+  it("imports a single room without a structure result", async () => {
+    const fixture = await prepareSession({ variant: "single-room" });
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("needs_review");
+
+    const planRows = await pool.query("select * from plans where id = $1", [session!.plan_id]);
+    const revision = await findPlanRevision(
+      pool,
+      fixture.organizationId,
+      planRows.rows[0].id,
+      planRows.rows[0].current_revision_id
+    );
+    const payload = revision!.payload;
+    expect(payload.rooms).toHaveLength(1);
+    expect(Array.isArray(payload.rooms[0]!.boundary)).toBe(true);
+    expect(payload.validationFindings.map((f) => f.code)).toContain("structure_missing");
+  });
+
+  it("keeps an unclosable room explicitly not_processed with a finding", async () => {
+    const fixture = await prepareSession({ variant: "missing-wall" });
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("needs_review");
+
+    const planRows = await pool.query("select * from plans where id = $1", [session!.plan_id]);
+    const revision = await findPlanRevision(
+      pool,
+      fixture.organizationId,
+      planRows.rows[0].id,
+      planRows.rows[0].current_revision_id
+    );
+    const payload = revision!.payload;
+    expect(payload.rooms[0]!.boundary).toBe(NOT_PROCESSED);
+    expect(payload.rooms[0]!.areaM2).toBe(NOT_PROCESSED);
+    expect(payload.walls).toHaveLength(3);
+    expect(payload.validationFindings.map((f) => f.code)).toContain("room_not_closed");
+  });
+
+  it("rejects an unsupported manifest schema version with a visible failure", async () => {
+    const fixture = await prepareSession({ variant: "unsupported-schema" });
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("failed");
+    expect(session?.failure_reason).toMatch(/manifest failed schema validation/);
+
+    const run = await pool.query("select * from import_runs where id = $1", [fixture.importRunId]);
+    expect(run.rows[0].status).toBe("failed");
   });
 });

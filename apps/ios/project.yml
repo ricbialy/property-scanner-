@@ -11,11 +11,17 @@ settings:
     SWIFT_VERSION: "5.10"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: "" # set locally, never commit a real team id
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: "0.9.19"
 targets:
   PropertyScan:
     type: application
     platform: iOS
     sources: [PropertyScan/Sources]
+    dependencies:
+      - package: ZIPFoundation
     info:
       path: PropertyScan/Info.plist
       properties:
