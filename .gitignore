@@ -1,0 +1,34 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# builds
+dist/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# local environment and secrets — never commit real credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+*.certSigningRequest
+
+# local infrastructure state
+.local/
+coverage/
+
+# iOS / Xcode
+apps/ios/*.xcodeproj
+apps/ios/*.xcworkspace
+apps/ios/build/
+apps/ios/DerivedData/
+xcuserdata/
+
+# OS noise
+.DS_Store

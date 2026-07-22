@@ -1,0 +1,83 @@
+{
+  "version": 2,
+  "identifier": "5f3a1b2c-0002-4a00-9000-00000000a002",
+  "story": 0,
+  "referenceOriginTransform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+  "walls": [
+    {
+      "category": { "wall": {} },
+      "identifier": "5f3a1b2c-1101-4a00-9000-00000000b101",
+      "confidence": { "high": {} },
+      "dimensions": [4.8, 2.44, 0.12],
+      "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2.4, 1.22, 0.0, 1]
+    },
+    {
+      "category": { "wall": {} },
+      "identifier": "5f3a1b2c-1102-4a00-9000-00000000b102",
+      "confidence": { "high": {} },
+      "dimensions": [4.2, 2.44, 0.12],
+      "transform": [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 4.8, 1.22, 2.1, 1]
+    },
+    {
+      "category": { "wall": {} },
+      "identifier": "5f3a1b2c-1103-4a00-9000-00000000b103",
+      "confidence": { "medium": {} },
+      "dimensions": [4.8, 2.44, 0.12],
+      "transform": [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 2.4, 1.22, 4.2, 1]
+    },
+    {
+      "category": { "wall": {} },
+      "identifier": "5f3a1b2c-1104-4a00-9000-00000000b104",
+      "confidence": { "low": {} },
+      "dimensions": [4.2, 2.44, 0.12],
+      "transform": [0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0.0, 1.22, 2.1, 1]
+    }
+  ],
+  "windows": [
+    {
+      "category": { "window": {} },
+      "identifier": "5f3a1b2c-2101-4a00-9000-00000000c101",
+      "confidence": { "high": {} },
+      "dimensions": [1.8, 1.4, 0.1],
+      "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2.4, 1.4, 0.0, 1],
+      "parentIdentifier": "5f3a1b2c-1101-4a00-9000-00000000b101"
+    },
+    {
+      "category": { "window": {} },
+      "identifier": "5f3a1b2c-2102-4a00-9000-00000000c102",
+      "confidence": { "medium": {} },
+      "dimensions": [0.9, 1.2, 0.1],
+      "transform": [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 4.8, 1.45, 2.1, 1],
+      "parentIdentifier": "5f3a1b2c-1102-4a00-9000-00000000b102"
+    }
+  ],
+  "doors": [
+    {
+      "category": { "door": { "isOpen": false } },
+      "identifier": "5f3a1b2c-3101-4a00-9000-00000000d101",
+      "confidence": { "high": {} },
+      "dimensions": [0.9, 2.03, 0.1],
+      "transform": [0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0.0, 1.015, 2.1, 1],
+      "parentIdentifier": "5f3a1b2c-1104-4a00-9000-00000000b104"
+    }
+  ],
+  "openings": [
+    {
+      "category": { "opening": {} },
+      "identifier": "5f3a1b2c-5101-4a00-9000-00000000f101",
+      "confidence": { "medium": {} },
+      "dimensions": [1.4, 2.1, 0.1],
+      "transform": [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 3.6, 1.05, 4.2, 1],
+      "parentIdentifier": "5f3a1b2c-1103-4a00-9000-00000000b103"
+    }
+  ],
+  "floors": [
+    {
+      "category": { "floor": {} },
+      "identifier": "5f3a1b2c-4101-4a00-9000-00000000e101",
+      "confidence": { "high": {} },
+      "dimensions": [4.8, 0, 4.2],
+      "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2.4, 0, 2.1, 1]
+    }
+  ]
+}

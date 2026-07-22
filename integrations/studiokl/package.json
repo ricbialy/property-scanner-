@@ -1,0 +1,25 @@
+{
+  "name": "@propertyscan/integration-studiokl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@propertyscan/eslint-config": "workspace:*",
+    "@propertyscan/typescript-config": "workspace:*",
+    "@types/node": "^22.20.1",
+    "eslint": "^9.28.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.0"
+  }
+}
