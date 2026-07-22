@@ -137,6 +137,30 @@ describe("scan session lifecycle", () => {
     });
     expect(missingKey.statusCode).toBe(400);
 
+    // Concurrent same-key requests: the reservation lets exactly one handler
+    // run; the other replays the stored response or gets a retryable 409.
+    const raceHeaders = { ...asUser("carol", orgId), "idempotency-key": "create-session-race" };
+    const [raceA, raceB] = await Promise.all([
+      ctx.app.inject({
+        method: "POST",
+        url: "/v1/scan-sessions",
+        headers: raceHeaders,
+        payload: createBody
+      }),
+      ctx.app.inject({
+        method: "POST",
+        url: "/v1/scan-sessions",
+        headers: raceHeaders,
+        payload: createBody
+      })
+    ]);
+    const raceStatuses = [raceA.statusCode, raceB.statusCode].sort();
+    expect(raceStatuses[0]).toBe(201);
+    expect([201, 409]).toContain(raceStatuses[1]);
+    const winners = [raceA, raceB].filter((r) => r.statusCode === 201).map((r) => r.json().id);
+    expect(new Set(winners).size).toBe(1);
+    expect(winners[0]).not.toBe(sessionId);
+
     // Handoff token issue + single-use redeem without auth.
     const tokenRes = await ctx.app.inject({
       method: "POST",

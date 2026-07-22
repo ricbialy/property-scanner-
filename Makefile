@@ -5,6 +5,7 @@ SHELL := /bin/bash
 ## bootstrap: install dependencies, start local infrastructure, migrate and seed.
 bootstrap:
 	pnpm install
+	pnpm build
 	./scripts/local-infra.sh up
 	pnpm db:migrate
 	pnpm db:seed

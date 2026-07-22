@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { zipSync } from "fflate";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type pg from "pg";
 import { createTestDatabase } from "@propertyscan/database/dist/testing.js";
@@ -56,7 +57,10 @@ interface SessionFixture {
   jobKey: string;
 }
 
-async function prepareSession(options?: FixtureOptions): Promise<SessionFixture> {
+async function prepareSession(
+  options?: FixtureOptions,
+  customZip?: Uint8Array
+): Promise<SessionFixture> {
   const org = await createOrganizationWithOwner(pool, {
     name: `Worker Org ${Math.random().toString(36).slice(2, 8)}`,
     ownerUserId: "user_worker_test"
@@ -75,7 +79,7 @@ async function prepareSession(options?: FixtureOptions): Promise<SessionFixture>
     externalReferences: []
   });
 
-  const { zip } = buildFixtureBundle(session.id, options ?? {});
+  const zip = customZip ?? buildFixtureBundle(session.id, options ?? {}).zip;
   const sha256 = createHash("sha256").update(zip).digest("hex");
   const objectKey = `orgs/${org.id}/scans/${session.id}/captures/${TWO_ROOM_FIXTURE.captureId}/bundle.zip`;
   await storage.put(objectKey, zip, "application/zip");
@@ -307,6 +311,32 @@ describe("import fixture matrix (spec §15.1)", () => {
     expect(payload.validationFindings.map((f) => f.code)).toContain("room_not_closed");
   });
 
+  it("treats syntactically invalid manifest JSON as a terminal failure, not a retry", async () => {
+    const zip = zipSync({ "manifest.json": new TextEncoder().encode("{not json!!") }, { level: 0 });
+    const fixture = await prepareSession(undefined, zip);
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("failed");
+    expect(session?.failure_reason).toMatch(/not valid JSON/);
+
+    const run = await pool.query("select * from import_runs where id = $1", [fixture.importRunId]);
+    expect(run.rows[0].status).toBe("failed");
+
+    // The job completed terminally — it must not be queued for retry.
+    const job = await pool.query("select status from jobs where job_key = $1", [fixture.jobKey]);
+    expect(job.rows[0].status).toBe("succeeded");
+  });
+
+  it("treats an unreadable zip bundle as a terminal failure", async () => {
+    const fixture = await prepareSession(undefined, new TextEncoder().encode("this is not a zip"));
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("failed");
+    expect(session?.failure_reason).toMatch(/not a readable zip/);
+  });
+
   it("rejects an unsupported manifest schema version with a visible failure", async () => {
     const fixture = await prepareSession({ variant: "unsupported-schema" });
     expect(await tick(deps)).toBe(true);
@@ -402,10 +432,18 @@ describe("outbox webhook dispatch", () => {
     };
 
     // First pass: endpoint fails -> delivery marked failed with backoff.
-    await dispatchOutbox(dispatchDeps);
+    // The dispatcher works in batches (like the real worker's repeated ticks),
+    // so keep dispatching until the backlog from earlier tests is drained and
+    // our event's delivery has been attempted.
     let delivery = await pool.query("select * from webhook_deliveries where outbox_event_id = $1", [
       eventId
     ]);
+    for (let i = 0; i < 20 && !delivery.rows[0]; i += 1) {
+      await dispatchOutbox(dispatchDeps);
+      delivery = await pool.query("select * from webhook_deliveries where outbox_event_id = $1", [
+        eventId
+      ]);
+    }
     expect(delivery.rows[0].status).toBe("failed");
     expect(delivery.rows[0].attempts).toBe(1);
 
