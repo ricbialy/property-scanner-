@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildFixtureBundle } from "@propertyscan/roomplan-fixtures";
+import {
+  createPlanWithInitialRevision,
+  createScanSession,
+  withTransaction
+} from "@propertyscan/database";
+import { GEOMETRY_SCHEMA_VERSION, uuidSchema } from "@propertyscan/contracts";
 
 import { asUser, createTestApp, type TestApp } from "./testSupport.js";
 
@@ -256,5 +262,202 @@ describe("scan session lifecycle", () => {
     const jobs = await ctx.pool.query("select * from jobs where job_type = 'import_capture'");
     expect(jobs.rows).toHaveLength(1);
     expect(jobs.rows[0].job_key).toBe(`import:${sessionId}:${sha256}`);
+  });
+});
+
+describe("exterior layer", () => {
+  it("creates facades and openings, tenant-scoped", async () => {
+    const orgId = await createOrg("dana", "Dana Exteriors");
+    const otherOrg = await createOrg("evan", "Evan Roofing");
+    const { propertyId } = await createPropertyAndFloor("dana", orgId);
+
+    const facadeRes = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/properties/${propertyId}/facades`,
+      headers: asUser("dana", orgId),
+      payload: { label: "Front", orientationDeg: 180 }
+    });
+    expect(facadeRes.statusCode).toBe(201);
+    const facadeId = facadeRes.json().id;
+
+    // Cross-tenant: Evan cannot see Dana's property facades.
+    const crossList = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/properties/${propertyId}/facades`,
+      headers: asUser("evan", otherOrg)
+    });
+    expect(crossList.statusCode).toBe(404);
+
+    const openingRes = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/facades/${facadeId}/openings`,
+      headers: asUser("dana", orgId),
+      payload: { openingType: "window", label: "Front left window" }
+    });
+    expect(openingRes.statusCode).toBe(201);
+    const opening = openingRes.json();
+    expect(opening.verification).toBe("unverified");
+    expect(opening.widthM).toBeNull();
+
+    // Laser field-verified width updates the displayed dimension with provenance.
+    const measurementRes = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/measurements",
+      headers: asUser("dana", orgId),
+      payload: {
+        subjectType: "facade_opening",
+        subjectId: opening.id,
+        value: 1.219,
+        unit: "m",
+        semanticType: "width",
+        source: "laser",
+        fieldVerified: true
+      }
+    });
+    expect(measurementRes.statusCode).toBe(201);
+    expect(measurementRes.json().verification).toBe("field_verified");
+    expect(measurementRes.json().capturedBy).toBe("dev_dana");
+
+    const listRes = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/facades/${facadeId}/openings`,
+      headers: asUser("dana", orgId)
+    });
+    const updated = listRes.json().data[0];
+    expect(updated.widthM).toBeCloseTo(1.219);
+    expect(updated.verification).toBe("field_verified");
+
+    // Measurement history is preserved, not mutated.
+    const history = await ctx.pool.query(
+      "select * from measurements where subject_id = $1 order by created_at",
+      [opening.id]
+    );
+    expect(history.rows).toHaveLength(1);
+    expect(history.rows[0].source).toBe("laser");
+
+    // Cross-tenant measurement rejected.
+    const crossMeasure = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/measurements",
+      headers: asUser("evan", otherOrg),
+      payload: {
+        subjectType: "facade_opening",
+        subjectId: opening.id,
+        value: 2,
+        unit: "m",
+        semanticType: "width",
+        source: "manual"
+      }
+    });
+    expect(crossMeasure.statusCode).toBe(404);
+  });
+});
+
+describe("schedules", () => {
+  it("serves window schedules with imperial display and disclaimer", async () => {
+    const orgId = await createOrg("frank", "Frank Windows");
+    const { propertyId, floorId } = await createPropertyAndFloor("frank", orgId);
+    const session = await createScanSession(ctx.pool, orgId, {
+      propertyId,
+      floorId,
+      requestedOutputs: ["normalized_json"],
+      externalReferences: []
+    });
+
+    const roomId = "0198aaaa-0000-7000-8000-000000000001";
+    const wallId = "0198aaaa-0000-7000-8000-000000000002";
+    const { plan } = await withTransaction(ctx.pool, (tx) =>
+      createPlanWithInitialRevision(tx, orgId, {
+        floorId,
+        scanSessionId: session.id,
+        reason: "test revision",
+        geometrySchemaVersion: GEOMETRY_SCHEMA_VERSION,
+        buildPayload: (planId, revisionId) => ({
+          schemaVersion: GEOMETRY_SCHEMA_VERSION,
+          planId,
+          revisionId,
+          coordinateConventions: {
+            units: "meters",
+            plan: "x-z-projection",
+            winding: "ccw",
+            angles: "radians"
+          },
+          rooms: [
+            {
+              id: roomId,
+              name: "Kitchen",
+              sourceRoomId: roomId,
+              boundary: [
+                { x: 0, y: 0 },
+                { x: 3, y: 0 },
+                { x: 3, y: 3 },
+                { x: 0, y: 3 }
+              ],
+              areaM2: 9,
+              confidence: "high"
+            }
+          ],
+          walls: [
+            {
+              id: wallId,
+              sourceId: null,
+              roomId,
+              start: { x: 0, y: 0 },
+              end: { x: 3, y: 0 },
+              thicknessM: 0.12,
+              heightM: 2.44,
+              source: "roomplan",
+              confidence: "high"
+            }
+          ],
+          openings: [
+            {
+              id: "0198aaaa-0000-7000-8000-000000000003",
+              sourceId: null,
+              type: "window",
+              wallId,
+              offsetAlongWallM: 1.5,
+              widthM: 0.9144,
+              heightM: 1.2,
+              sillHeightM: 0.9,
+              roomIds: [roomId],
+              confidence: "high",
+              verification: "unverified"
+            }
+          ],
+          validationFindings: []
+        })
+      })
+    );
+
+    const windows = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/plans/${plan.id}/schedules/windows`,
+      headers: asUser("frank", orgId)
+    });
+    expect(windows.statusCode).toBe(200);
+    const body = windows.json();
+    expect(body.displayUnits).toBe("imperial");
+    expect(body.disclaimer).toMatch(/preliminary estimates/);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].key).toBe("W01");
+    expect(body.data[0].rooms).toEqual(["Kitchen"]);
+    expect(body.data[0].widthDisplay).toBe("3'-0\"");
+    expect(body.data[0].verification).toBe("unverified");
+
+    const doors = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/plans/${plan.id}/schedules/doors`,
+      headers: asUser("frank", orgId)
+    });
+    expect(doors.json().data).toHaveLength(0);
+
+    const openings = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/plans/${plan.id}/openings`,
+      headers: asUser("frank", orgId)
+    });
+    expect(openings.json().data).toHaveLength(1);
+    expect(uuidSchema.safeParse(openings.json().revisionId).success).toBe(true);
   });
 });

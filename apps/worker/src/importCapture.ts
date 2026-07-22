@@ -13,16 +13,18 @@ import {
   appendOutboxEvent,
   createPlanWithInitialRevision,
   finishImportRun,
-  insertRoomStub,
+  insertOpeningRecord,
+  insertRoomRecord,
+  insertWallRecord,
   startImportRun,
   transitionScanSession,
-  uuidv7,
   withTransaction
 } from "@propertyscan/database";
 import type { ObjectStorage } from "@propertyscan/storage";
 import type pg from "pg";
 
-import { confidenceLevel, roomplanRoomSchema, roomplanStructureSchema } from "./roomplanAdapter.js";
+import { roomplanRoomSchema, roomplanStructureSchema } from "./roomplanAdapter.js";
+import { normalizeGeometry, type RoomToNormalize } from "./normalizeGeometry.js";
 
 export interface ImportJobPayload {
   importRunId: string;
@@ -125,11 +127,7 @@ export async function processImportCapture(
   }
 
   // Parse each room through the adapter.
-  const parsedRooms: Array<{
-    roomId: string;
-    name: string | null;
-    confidence: "high" | "medium" | "low" | "unknown";
-  }> = [];
+  const roomInputs: RoomToNormalize[] = [];
   for (const room of manifest.rooms) {
     const parse = roomplanRoomSchema.safeParse(
       JSON.parse(new TextDecoder().decode(entries[room.roomplanFile]!))
@@ -177,26 +175,19 @@ export async function processImportCapture(
         }
       }
     }
-    const wallConfidences = captured.walls.map((w) => confidenceLevel(w.confidence));
-    const roomConfidence = wallConfidences.includes("low")
-      ? "low"
-      : wallConfidences.includes("medium")
-        ? "medium"
-        : wallConfidences.includes("high")
-          ? "high"
-          : "unknown";
-    parsedRooms.push({
+    roomInputs.push({
       roomId: room.roomId,
       name: room.name ?? null,
-      confidence: roomConfidence
+      captured
     });
   }
 
-  if (parsedRooms.length === 0) {
+  if (roomInputs.length === 0) {
     throw new ImportError("no readable rooms in bundle", findings);
   }
 
-  // Multiroom structure alignment presence check (normalization is Phase 3).
+  // Multiroom structure alignment: apply per-room world transforms when the
+  // structure result is present and sane.
   if (manifest.structureFile) {
     const structureParse = roomplanStructureSchema.safeParse(
       JSON.parse(new TextDecoder().decode(entries[manifest.structureFile]!))
@@ -218,6 +209,13 @@ export async function processImportCapture(
             subjectType: "room",
             subjectId: structRoom.identifier
           });
+          continue;
+        }
+        const target = roomInputs.find(
+          (r) => r.roomId.toLowerCase() === structRoom.identifier.toLowerCase()
+        );
+        if (target) {
+          target.structureTransform = structRoom.transform;
         }
       }
     }
@@ -229,16 +227,14 @@ export async function processImportCapture(
     });
   }
 
-  findings.push({
-    code: "geometry_not_normalized",
-    severity: "info",
-    message:
-      "wall/opening geometry normalization is not yet implemented; geometry fields are explicitly not_processed"
-  });
+  // Normalize surfaces into canonical 2D geometry. Whatever cannot be derived
+  // stays explicitly not_processed with a finding.
+  const normalized = normalizeGeometry(roomInputs);
+  findings.push(...normalized.findings);
 
-  // Create plan + immutable initial revision + room stubs, transition the
-  // session, and append the outbox event in ONE transaction (no webhook
-  // before durable commit).
+  // Create plan + immutable initial revision + relational projections,
+  // transition the session, and append the outbox event in ONE transaction
+  // (no webhook before durable commit).
   const result = await withTransaction(pool, async (tx) => {
     const { plan, revision } = await createPlanWithInitialRevision(tx, organizationId, {
       floorId: (await tx.query("select floor_id from scan_sessions where id = $1", [scanSessionId]))
@@ -256,28 +252,29 @@ export async function processImportCapture(
           winding: "ccw",
           angles: "radians"
         },
-        rooms: parsedRooms.map((room) => ({
-          id: uuidv7(),
-          name: room.name,
-          sourceRoomId: room.roomId,
-          boundary: NOT_PROCESSED,
-          areaM2: NOT_PROCESSED,
-          confidence: room.confidence
-        })),
-        walls: [],
-        openings: [],
+        rooms: normalized.rooms,
+        walls: normalized.walls,
+        openings: normalized.openings,
         validationFindings: findings
       })
     });
 
     for (const room of revision.payload.rooms) {
-      await insertRoomStub(tx, organizationId, {
+      await insertRoomRecord(tx, organizationId, {
         id: room.id,
         planRevisionId: revision.id,
         sourceRoomId: room.sourceRoomId,
         name: room.name,
-        confidence: room.confidence
+        confidence: room.confidence,
+        boundary: room.boundary === NOT_PROCESSED ? null : room.boundary,
+        areaM2: room.areaM2 === NOT_PROCESSED ? null : room.areaM2
       });
+    }
+    for (const wall of revision.payload.walls) {
+      await insertWallRecord(tx, organizationId, { planRevisionId: revision.id, wall });
+    }
+    for (const opening of revision.payload.openings) {
+      await insertOpeningRecord(tx, organizationId, { planRevisionId: revision.id, opening });
     }
 
     const transitioned = await transitionScanSession(

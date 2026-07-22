@@ -17,6 +17,7 @@
     "@propertyscan/config": "workspace:*",
     "@propertyscan/contracts": "workspace:*",
     "@propertyscan/database": "workspace:*",
+    "@propertyscan/geometry": "workspace:*",
     "@propertyscan/observability": "workspace:*",
     "@propertyscan/storage": "workspace:*",
     "fastify": "^5.3.0",

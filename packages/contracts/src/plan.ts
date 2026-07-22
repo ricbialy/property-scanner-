@@ -32,6 +32,8 @@ export const planRoomSchema = z.object({
 
 export const planWallSchema = z.object({
   id: uuidSchema,
+  /** RoomPlan surface identifier this wall was derived from. */
+  sourceId: uuidSchema.nullable(),
   roomId: uuidSchema,
   start: z.union([point2Schema, notProcessedSchema]),
   end: z.union([point2Schema, notProcessedSchema]),
@@ -43,6 +45,8 @@ export const planWallSchema = z.object({
 
 export const planOpeningSchema = z.object({
   id: uuidSchema,
+  /** RoomPlan surface identifier this opening was derived from. */
+  sourceId: uuidSchema.nullable(),
   type: openingTypeSchema,
   wallId: uuidSchema.nullable(),
   offsetAlongWallM: z.union([z.number(), notProcessedSchema]),

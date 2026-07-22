@@ -118,5 +118,14 @@ console.log(JSON.stringify({
 }, null, 2));
 '
 
+step "Window schedule (imperial display, provenance included)"
+curl -sf "$API/v1/plans/$PLAN_ID/schedules/windows" -H "$AUTH" -H "$ORG" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0));
+console.log(s.disclaimer);
+for (const w of s.data) {
+  console.log(`${w.key}  ${w.rooms.join(", ")}  ${w.widthDisplay} x ${w.heightDisplay}  sill ${w.sillHeightDisplay}  [${w.confidence}/${w.verification}]`);
+}
+'
+
 echo
 echo "Vertical slice complete."

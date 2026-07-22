@@ -9,6 +9,7 @@ import { registerOrganizationRoutes } from "./routes/organizations.js";
 import { registerPlanRoutes } from "./routes/plans.js";
 import { registerPropertyRoutes } from "./routes/properties.js";
 import { registerScanSessionRoutes } from "./routes/scanSessions.js";
+import { registerExteriorRoutes } from "./routes/exterior.js";
 
 export function buildServer(deps: AppDeps): FastifyInstance {
   // Cast: pino's Logger is runtime-compatible with FastifyBaseLogger but their
@@ -43,6 +44,7 @@ export function buildServer(deps: AppDeps): FastifyInstance {
   registerPropertyRoutes(app, deps);
   registerScanSessionRoutes(app, deps);
   registerPlanRoutes(app, deps);
+  registerExteriorRoutes(app, deps);
 
   return app;
 }

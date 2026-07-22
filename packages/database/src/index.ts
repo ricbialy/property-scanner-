@@ -13,3 +13,5 @@ export * from "./repositories/jobs.js";
 export * from "./repositories/idempotency.js";
 export * from "./repositories/audit.js";
 export * from "./repositories/outbox.js";
+export * from "./repositories/facades.js";
+export * from "./repositories/measurements.js";

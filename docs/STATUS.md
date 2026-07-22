@@ -43,15 +43,42 @@ than the tests demonstrate.
 - StudioKL reference pieces: signed webhook envelope (HMAC-SHA256, timestamp
   tolerance, key rotation), idempotent consumer example, field-mapping draft.
 - `make demo` / `scripts/demo-vertical-slice.sh`: the complete placeholder-free
-  path from tenant creation to normalized plan stub.
+  path from tenant creation to normalized plan.
+
+**Exterior layer (ADR 0006)**
+
+- Facades and facade openings per property (tenant-scoped, tested), with
+  optional links to interior plan openings.
+- `POST /v1/measurements`: manual/laser measurements with full provenance;
+  `field_verified` requires user identity + timestamp + manual/laser source and
+  append-only history; verified width/height/sill denormalizes onto the facade
+  opening for display.
+- Honest scope: documentation-first — no automatic exterior reconstruction is
+  claimed. iOS exterior photo UX and web facade panel are follow-ups.
+
+**Phase 3 geometry normalization (ADR 0007)**
+
+- Walls derived from RoomPlan centered transforms (multiroom structure
+  transforms composed), room boundaries assembled from wall loops with
+  tolerance snapping, openings attached to host walls with offsets and sill
+  heights; unresolvable geometry stays explicitly `not_processed` with
+  findings (`room_not_closed`, `opening_unattached`, …).
+- Fresh UUIDv7 payload ids per revision with RoomPlan `sourceId` provenance;
+  relational room/wall/opening projections written transactionally.
+- Schedules: `GET /v1/plans/{id}/openings` and
+  `/v1/plans/{id}/schedules/windows|doors` with display-only imperial
+  formatting and a preliminary-measurement disclaimer.
 
 ## Not done (next)
 
 - **Phase 2**: real device capture, multiroom structure UX, opening photos,
   background resumable uploads, iOS compilation on macOS CI, sanitized real
   device fixtures.
-- **Phase 3**: geometry normalization (walls/openings from RoomPlan transforms),
-  topology validation, schedules endpoints, OpenAPI document, media pipeline.
+- **Phase 3 remainder**: media upload pipeline (photos, thumbnails, EXIF
+  stripping), richer topology validation (overlaps, duplicate surfaces across
+  rooms), shared-door dedup across adjacent rooms, OpenAPI document.
+- **Exterior follow-ups**: iOS exterior photo capture UX, web facade panel,
+  facade media attachment endpoints.
 - **Phase 4**: browser editor (commands, undo/redo, optimistic concurrency),
   revision accept/compare, measurement verification UI.
 - **Phase 5**: SVG/PDF rendering package, export jobs, webhook delivery worker

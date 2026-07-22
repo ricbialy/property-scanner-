@@ -149,12 +149,47 @@ describe("import_capture job", () => {
     expect(payload.rooms).toHaveLength(2);
     const names = payload.rooms.map((r) => r.name).sort();
     expect(names).toEqual(["Kitchen", "Living Room"]);
-    for (const room of payload.rooms) {
-      expect(room.boundary).toBe(NOT_PROCESSED);
-      expect(room.areaM2).toBe(NOT_PROCESSED);
-      expect(["high", "medium", "low", "unknown"]).toContain(room.confidence);
+
+    // Normalized geometry: closed boundaries with real areas (3.6×3.0, 4.8×4.2).
+    const kitchen = payload.rooms.find((r) => r.name === "Kitchen")!;
+    const living = payload.rooms.find((r) => r.name === "Living Room")!;
+    expect(Array.isArray(kitchen.boundary)).toBe(true);
+    expect(kitchen.boundary).toHaveLength(4);
+    expect(kitchen.areaM2 as number).toBeCloseTo(10.8, 1);
+    expect(living.areaM2 as number).toBeCloseTo(20.16, 1);
+    expect(payload.rooms.every((r) => r.boundary !== NOT_PROCESSED)).toBe(true);
+
+    // 4 walls per room; every wall carries endpoints and provenance.
+    expect(payload.walls).toHaveLength(8);
+    for (const wall of payload.walls) {
+      expect(typeof wall.start).toBe("object");
+      expect(wall.source).toBe("roomplan");
+      expect(wall.sourceId).toBeTruthy();
     }
-    expect(payload.validationFindings.map((f) => f.code)).toContain("geometry_not_normalized");
+
+    // Openings: 3 windows, 2 doors, 1 open passage — all attached to host walls.
+    const byType = (t: string) => payload.openings.filter((o) => o.type === t);
+    expect(byType("window")).toHaveLength(3);
+    expect(byType("door")).toHaveLength(2);
+    expect(byType("open_passage")).toHaveLength(1);
+    const wallIds = new Set(payload.walls.map((w) => w.id));
+    for (const opening of payload.openings) {
+      expect(opening.wallId && wallIds.has(opening.wallId)).toBe(true);
+      expect(typeof opening.offsetAlongWallM).toBe("number");
+      expect(opening.verification).toBe("unverified");
+    }
+    // Kitchen window: center 1.5 m, height 1.1 m → sill 0.95 m.
+    const kitchenWindow = payload.openings.find(
+      (o) => o.sourceId === "5f3a1b2c-2001-4a00-9000-00000000c001"
+    )!;
+    expect(kitchenWindow.sillHeightM as number).toBeCloseTo(0.95, 2);
+
+    // The living room is placed by the structure transform (180° about Y,
+    // translated), so its boundary must not overlap the kitchen's origin box.
+    const livingXs = (living.boundary as Array<{ x: number }>).map((p) => p.x);
+    expect(Math.min(...livingXs)).toBeLessThan(0);
+
+    expect(payload.validationFindings.map((f) => f.code)).not.toContain("room_not_closed");
 
     // Raw artifacts preserved immutably.
     const rawKey = `orgs/${fixture.organizationId}/scans/${fixture.scanSessionId}/captures/${TWO_ROOM_FIXTURE.captureId}/raw/roomplan/structure.json`;
@@ -171,11 +206,22 @@ describe("import_capture job", () => {
     );
     expect(outbox.rows.map((r) => r.event_type)).toContain("scan.needs_review");
 
-    // Room stubs materialized relationally too.
+    // Rooms, walls, and openings materialized relationally too.
     const rooms = await pool.query("select * from rooms where plan_revision_id = $1", [
       revision!.id
     ]);
     expect(rooms.rows).toHaveLength(2);
+    expect(rooms.rows.every((r) => r.area_m2 > 0 && Array.isArray(r.boundary))).toBe(true);
+    const wallRows = await pool.query(
+      "select count(*)::int as n from walls where plan_revision_id = $1",
+      [revision!.id]
+    );
+    expect(wallRows.rows[0].n).toBe(8);
+    const openingRows = await pool.query(
+      "select count(*)::int as n from openings where plan_revision_id = $1",
+      [revision!.id]
+    );
+    expect(openingRows.rows[0].n).toBe(6);
   });
 
   it("re-running the same job key does not duplicate plans", async () => {
