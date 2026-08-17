@@ -184,3 +184,72 @@ export async function insertOpeningRecord(
     ]
   );
 }
+
+/**
+ * Insert a child revision (user correction). Caller runs inside a transaction
+ * and is responsible for having verified optimistic concurrency against the
+ * plan's current revision. The parent revision is never mutated.
+ */
+export async function insertChildRevision(
+  db: Queryable,
+  organizationId: string,
+  input: {
+    planId: string;
+    parentRevision: PlanRevisionRow;
+    reason: string;
+    authorType: "user" | "system";
+    buildPayload: (revisionId: string) => PlanRevisionPayload;
+  }
+): Promise<PlanRevisionRow> {
+  const revisionId = uuidv7();
+  const payload = input.buildPayload(revisionId);
+  const { rows } = await db.query(
+    `insert into plan_revisions
+       (id, organization_id, plan_id, parent_revision_id, author_type, reason, status, version, geometry_schema_version, payload)
+     values ($1, $2, $3, $4, $5, $6, 'draft', $7, $8, $9) returning *`,
+    [
+      revisionId,
+      organizationId,
+      input.planId,
+      input.parentRevision.id,
+      input.authorType,
+      input.reason,
+      input.parentRevision.version + 1,
+      input.parentRevision.geometry_schema_version,
+      JSON.stringify(payload)
+    ]
+  );
+  await db.query("update plans set current_revision_id = $1 where id = $2", [
+    revisionId,
+    input.planId
+  ]);
+  return rows[0] as PlanRevisionRow;
+}
+
+/**
+ * Accept a revision: it becomes the plan's authoritative geometry; every other
+ * revision of the plan is marked superseded (never deleted, never mutated in
+ * content). Returns null when the revision is not the plan's current revision.
+ */
+export async function acceptRevision(
+  db: Queryable,
+  organizationId: string,
+  planId: string,
+  revisionId: string
+): Promise<PlanRevisionRow | null> {
+  const plan = await findPlanById(db, organizationId, planId);
+  if (!plan || plan.current_revision_id !== revisionId) {
+    return null;
+  }
+  await db.query(
+    `update plan_revisions set status = 'superseded'
+     where plan_id = $1 and organization_id = $2 and id <> $3 and status <> 'superseded'`,
+    [planId, organizationId, revisionId]
+  );
+  const { rows } = await db.query(
+    `update plan_revisions set status = 'accepted'
+     where id = $1 and plan_id = $2 and organization_id = $3 returning *`,
+    [revisionId, planId, organizationId]
+  );
+  return (rows[0] as PlanRevisionRow | undefined) ?? null;
+}

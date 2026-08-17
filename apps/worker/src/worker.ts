@@ -9,12 +9,17 @@ import {
   processImportCapture,
   type ImportJobPayload
 } from "./importCapture.js";
+import { dispatchOutbox } from "./dispatchOutbox.js";
 
 export interface WorkerDeps {
   pool: pg.Pool;
   storage: ObjectStorage;
   log: Logger;
   workerId: string;
+  webhooks?: {
+    masterKey: string;
+    externalWebhooksDisabled: boolean;
+  };
 }
 
 /**
@@ -25,6 +30,15 @@ export interface WorkerDeps {
  */
 export async function tick(deps: WorkerDeps): Promise<boolean> {
   const { pool, storage, log, workerId } = deps;
+  // Outbox dispatch runs every tick so webhook delivery keeps pace with jobs.
+  if (deps.webhooks) {
+    await dispatchOutbox({
+      pool,
+      log,
+      masterKey: deps.webhooks.masterKey,
+      externalWebhooksDisabled: deps.webhooks.externalWebhooksDisabled
+    }).catch((error) => log.error({ err: error }, "outbox dispatch failed"));
+  }
   const job = await claimNextJob(pool, workerId);
   if (!job) {
     return false;

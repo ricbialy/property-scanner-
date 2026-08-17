@@ -158,10 +158,36 @@ export function PropertyPanel({ organizationId }: { organizationId: string }) {
             ))}
           </ul>
           {sessions.length > 0 ? (
+            <>
+              <button
+                onClick={() =>
+                  void (async () => {
+                    const updated = await Promise.all(
+                      sessions.map((s) =>
+                        api<ScanSession>(`/v1/scan-sessions/${s.id}`, { organizationId })
+                      )
+                    );
+                    setSessions(updated);
+                  })()
+                }
+              >
+                Refresh session status
+              </button>
+            </>
+          ) : null}
+          {sessions.length > 0 ? (
             <ul>
               {sessions.map((session) => (
                 <li key={session.id}>
                   Session <code>{session.id.slice(0, 8)}…</code> — status: {session.status}
+                  {session.planId ? (
+                    <>
+                      {" "}
+                      <a href={`/plans/${session.planId}?org=${organizationId}`}>
+                        Review floor plan →
+                      </a>
+                    </>
+                  ) : null}
                 </li>
               ))}
             </ul>

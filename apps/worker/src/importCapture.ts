@@ -43,6 +43,13 @@ export class ImportError extends Error {
   }
 }
 
+// Malformed bytes in a user-uploaded bundle are a terminal import failure, not
+// an infrastructure error — throwing a plain SyntaxError here would send the
+// job into retry/dead-letter and leave the session stuck in 'processing'.
+function decodeJson(bytes: Uint8Array): unknown {
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
 /**
  * Import pipeline (spec §9.4, current milestone scope):
  * verify manifest + checksums, preserve raw artifacts immutably, parse RoomPlan
@@ -79,15 +86,24 @@ export async function processImportCapture(
     }
   }
 
-  const entries = unzipSync(bundleBytes);
+  let entries: Record<string, Uint8Array>;
+  try {
+    entries = unzipSync(bundleBytes);
+  } catch {
+    throw new ImportError("bundle is not a readable zip archive");
+  }
   const manifestBytes = entries["manifest.json"];
   if (!manifestBytes) {
     throw new ImportError("bundle is missing manifest.json");
   }
 
-  const manifestParse = captureManifestSchema.safeParse(
-    JSON.parse(new TextDecoder().decode(manifestBytes))
-  );
+  let manifestJson: unknown;
+  try {
+    manifestJson = decodeJson(manifestBytes);
+  } catch {
+    throw new ImportError("manifest.json is not valid JSON");
+  }
+  const manifestParse = captureManifestSchema.safeParse(manifestJson);
   if (!manifestParse.success) {
     throw new ImportError(
       "manifest failed schema validation",
@@ -129,9 +145,22 @@ export async function processImportCapture(
   // Parse each room through the adapter.
   const roomInputs: RoomToNormalize[] = [];
   for (const room of manifest.rooms) {
-    const parse = roomplanRoomSchema.safeParse(
-      JSON.parse(new TextDecoder().decode(entries[room.roomplanFile]!))
-    );
+    let roomJson: unknown;
+    try {
+      const bytes = entries[room.roomplanFile];
+      if (!bytes) throw new Error("file missing from bundle");
+      roomJson = decodeJson(bytes);
+    } catch (error) {
+      findings.push({
+        code: "roomplan_room_unreadable",
+        severity: "error",
+        message: `room ${room.roomId}: ${(error as Error).message}`,
+        subjectType: "room",
+        subjectId: room.roomId
+      });
+      continue;
+    }
+    const parse = roomplanRoomSchema.safeParse(roomJson);
     if (!parse.success) {
       findings.push({
         code: "roomplan_room_unreadable",
@@ -189,9 +218,14 @@ export async function processImportCapture(
   // Multiroom structure alignment: apply per-room world transforms when the
   // structure result is present and sane.
   if (manifest.structureFile) {
-    const structureParse = roomplanStructureSchema.safeParse(
-      JSON.parse(new TextDecoder().decode(entries[manifest.structureFile]!))
-    );
+    let structureJson: unknown = null;
+    try {
+      const bytes = entries[manifest.structureFile];
+      if (bytes) structureJson = decodeJson(bytes);
+    } catch {
+      // leave null: schema parse below fails and records the finding
+    }
+    const structureParse = roomplanStructureSchema.safeParse(structureJson);
     if (!structureParse.success) {
       findings.push({
         code: "structure_unreadable",

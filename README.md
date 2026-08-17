@@ -44,11 +44,30 @@ Copy `.env.example` to `.env` for local settings. Local development defaults to
 refused in production, where Clerk JWT verification and S3-compatible storage
 are mandatory. See `docs/operations/local-development.md`.
 
-## Status
+## Try it (no iPhone needed)
 
-Phase 0 (repo/toolchain/infra) and Phase 1 (tenanted SaaS + scan-session
-vertical slice) are implemented with tests, plus: the capture-bundle manifest
-contract, a deterministic two-room RoomPlan fixture, the worker import pipeline
-producing an initial immutable plan revision (geometry explicitly
-`not_processed` pending Phase 3 normalization), and the iOS capture shell.
-`docs/STATUS.md` tracks exactly what is and is not done.
+```bash
+make bootstrap    # install deps, start Postgres, migrate
+make test-demo    # start API+worker+web+StudioKL simulator, seed every fixture
+                  # scenario, print the browser URLs to explore
+make stop-demo    # stop the demo services
+```
+
+`make test-demo` walks the entire workflow with deterministic fixtures:
+interrupted-and-resumed upload, geometry normalization, browser review URL,
+correction + accepted revision, signed webhook, and a simulated StudioKL import
+(written to `.local/studiokl-import.json`). A live testing panel is at
+`/status` in the web app.
+
+Testing on a real iPhone requires a Mac to compile the iOS app — see
+`docs/testing/device-testing-guide.md` (including a no-Mac CI alternative).
+
+## Status — read this honestly
+
+The backend + browser workflow is **automatically tested** (58 unit + 27
+integration tests, CI on every commit). The iOS app is **source implemented
+but has never been compiled** (no macOS in the development environment), and
+**no field validation has been performed** — measurement accuracy is unknown
+until the protocol in `docs/testing/field-validation-worksheet.md` is executed.
+The complete scan-a-real-property workflow is therefore **not yet MVP ready**.
+The full feature-status matrix lives in `docs/STATUS.md`.

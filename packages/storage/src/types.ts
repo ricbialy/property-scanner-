@@ -13,6 +13,11 @@ export interface ObjectStorage {
    * fs driver: null — the API accepts the bytes on its local upload endpoint.
    */
   createUploadUrl(key: string, contentType: string, expiresSeconds: number): Promise<string | null>;
+  /**
+   * Short-lived signed download URL. S3 driver: presigned GET; fs driver:
+   * null — the API streams the bytes itself behind authorization.
+   */
+  createDownloadUrl(key: string, expiresSeconds: number): Promise<string | null>;
 }
 
 const KEY_PATTERN = /^[a-z0-9][a-z0-9/_.-]{0,511}$/;

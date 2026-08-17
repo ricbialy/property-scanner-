@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { loadEnv } from "@propertyscan/config";
 import { createTestDatabase } from "@propertyscan/database/dist/testing.js";
-import { createFsStorage } from "@propertyscan/storage";
+import { createFsStorage, type ObjectStorage } from "@propertyscan/storage";
 import { createDevVerifier } from "@propertyscan/auth";
 import type pg from "pg";
 
@@ -14,6 +14,7 @@ import { buildServer } from "./server.js";
 export interface TestApp {
   app: FastifyInstance;
   pool: pg.Pool;
+  storage: ObjectStorage;
   teardown: () => Promise<void>;
 }
 
@@ -27,15 +28,17 @@ export async function createTestApp(): Promise<TestApp> {
     WEBHOOK_MASTER_ENCRYPTION_KEY: "dev-only-not-a-real-key-0000000000000000",
     STORAGE_FS_ROOT: storageRoot
   });
+  const storage = createFsStorage(storageRoot);
   const app = buildServer({
     env,
     pool,
-    storage: createFsStorage(storageRoot),
+    storage,
     verifier: createDevVerifier()
   });
   return {
     app,
     pool,
+    storage,
     teardown: async () => {
       await app.close();
       await dropDb();

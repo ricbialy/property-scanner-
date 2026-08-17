@@ -34,7 +34,8 @@ export interface FixtureBundle {
  * - `unsupported-schema`: a manifest declaring a future schema version the
  *   importer must reject cleanly.
  */
-export type FixtureVariant = "two-room" | "single-room" | "missing-wall" | "unsupported-schema";
+export type FixtureVariant =
+  "two-room" | "single-room" | "missing-wall" | "unsupported-schema" | "duplicate-opening";
 
 export interface FixtureOptions {
   captureId?: string;
@@ -61,6 +62,18 @@ export function buildFixtureBundle(scanSessionId: string, options?: FixtureOptio
   if (variant === "missing-wall") {
     const room = JSON.parse(new TextDecoder().decode(kitchenBytes)) as { walls: unknown[] };
     room.walls = room.walls.slice(0, 3);
+    kitchenBytes = encoder.encode(JSON.stringify(room, null, 2));
+  }
+  if (variant === "duplicate-opening") {
+    // RoomPlan sometimes yields the same physical door twice; clone the
+    // kitchen door with a new identifier at the same transform.
+    const room = JSON.parse(new TextDecoder().decode(kitchenBytes)) as {
+      doors: Array<Record<string, unknown>>;
+    };
+    room.doors.push({
+      ...room.doors[0]!,
+      identifier: "5f3a1b2c-3002-4a00-9000-00000000d002"
+    });
     kitchenBytes = encoder.encode(JSON.stringify(room, null, 2));
   }
 

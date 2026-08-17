@@ -4,9 +4,19 @@ SwiftUI capture app for LiDAR-equipped iPhone/iPad (test hardware: iPhone 15 Pro
 iPad Pro). Captures rooms with RoomPlan, reviews locally, and uploads durable,
 checksummed capture bundles.
 
-## Status (Phase 2 shell)
+## Status — IMPORTANT
 
-Implemented in this milestone:
+**Status: Compiled and unit-tested on the iOS Simulator via CI — never run on
+a physical device.** The `ios` CI job (macos-15, Xcode 16, iPhone 16 Pro
+simulator) builds the app and runs the XCTest suite on every push. RoomPlan
+capture itself cannot execute in the simulator, so scanning, upload-resume
+behaviour on a jobsite, and measurement quality remain unverified until a real
+LiDAR device runs it — see `docs/testing/device-testing-guide.md`. To pause the
+macOS CI job (paid minutes), set repository variable `DISABLE_IOS_CI=true`.
+
+## What the source implements
+
+Written (not compiled, not device-tested):
 
 - capability gating (`DeviceCapability`) — unsupported devices get a precise
   message, never fake capture;

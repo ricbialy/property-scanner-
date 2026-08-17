@@ -11,6 +11,7 @@ import {
 import { GEOMETRY_SCHEMA_VERSION, uuidSchema } from "@propertyscan/contracts";
 
 import { asUser, createTestApp, type TestApp } from "./testSupport.js";
+import { buildJpeg } from "./lib/imageFixtures.js";
 
 let ctx: TestApp;
 
@@ -135,6 +136,30 @@ describe("scan session lifecycle", () => {
       payload: createBody
     });
     expect(missingKey.statusCode).toBe(400);
+
+    // Concurrent same-key requests: the reservation lets exactly one handler
+    // run; the other replays the stored response or gets a retryable 409.
+    const raceHeaders = { ...asUser("carol", orgId), "idempotency-key": "create-session-race" };
+    const [raceA, raceB] = await Promise.all([
+      ctx.app.inject({
+        method: "POST",
+        url: "/v1/scan-sessions",
+        headers: raceHeaders,
+        payload: createBody
+      }),
+      ctx.app.inject({
+        method: "POST",
+        url: "/v1/scan-sessions",
+        headers: raceHeaders,
+        payload: createBody
+      })
+    ]);
+    const raceStatuses = [raceA.statusCode, raceB.statusCode].sort();
+    expect(raceStatuses[0]).toBe(201);
+    expect([201, 409]).toContain(raceStatuses[1]);
+    const winners = [raceA, raceB].filter((r) => r.statusCode === 201).map((r) => r.json().id);
+    expect(new Set(winners).size).toBe(1);
+    expect(winners[0]).not.toBe(sessionId);
 
     // Handoff token issue + single-use redeem without auth.
     const tokenRes = await ctx.app.inject({
@@ -608,5 +633,423 @@ describe("resumable chunked uploads", () => {
     });
     expect(complete.statusCode).toBe(200);
     expect(complete.json().status).toBe("uploaded");
+  });
+
+  it("completes a chunked upload whose parts went directly to storage (presigned path)", async () => {
+    // On S3 the client PUTs each part to a presigned URL and the API never
+    // sees them — no capture_upload_parts rows exist. Completion and resume
+    // status must treat the stored part objects as the source of truth.
+    const orgId = await createOrg("leo", "Leo Presigned Ltd");
+    const { propertyId, floorId } = await createPropertyAndFloor("leo", orgId);
+    const sessionRes = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/scan-sessions",
+      headers: { ...asUser("leo", orgId), "idempotency-key": "leo-1" },
+      payload: { propertyId, floorId, requestedOutputs: ["normalized_json"] }
+    });
+    const sessionId = sessionRes.json().id;
+
+    const { manifest, zip } = buildFixtureBundle(sessionId);
+    const sha256 = createHash("sha256").update(zip).digest("hex");
+    const partSize = Math.ceil(zip.byteLength / 2);
+    const parts = [zip.slice(0, partSize), zip.slice(partSize)];
+
+    const uploadRes = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/scan-sessions/${sessionId}/uploads`,
+      headers: asUser("leo", orgId),
+      payload: {
+        captureId: manifest.captureId,
+        byteSize: zip.byteLength,
+        contentType: "application/zip",
+        partCount: 2
+      }
+    });
+    expect(uploadRes.statusCode).toBe(201);
+    const upload = uploadRes.json();
+
+    // Simulate presigned PUTs: write part objects straight into storage.
+    const partKey = (n: number) => `${upload.objectKey}.part${String(n).padStart(5, "0")}`;
+    await ctx.storage.put(partKey(1), parts[0]!, "application/octet-stream");
+
+    // Resume status sees the directly-stored part without a DB row.
+    const statusRes = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/scan-sessions/${sessionId}/uploads/${upload.uploadId}`,
+      headers: asUser("leo", orgId)
+    });
+    expect(statusRes.json().receivedParts).toEqual([1]);
+    expect(statusRes.json().missingParts).toEqual([2]);
+
+    await ctx.storage.put(partKey(2), parts[1]!, "application/octet-stream");
+
+    const complete = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/scan-sessions/${sessionId}/uploads/${upload.uploadId}/complete`,
+      headers: asUser("leo", orgId),
+      payload: { sha256, byteSize: zip.byteLength }
+    });
+    expect(complete.statusCode).toBe(200);
+    expect(complete.json().status).toBe("uploaded");
+
+    // Completion backfills the part audit rows the local route would have written.
+    const partRows = await ctx.pool.query(
+      "select part_number from capture_upload_parts where capture_artifact_id = $1 order by part_number",
+      [upload.uploadId]
+    );
+    expect(partRows.rows.map((r) => r.part_number)).toEqual([1, 2]);
+  });
+});
+
+describe("media pipeline", () => {
+  it("uploads, validates, strips JPEG EXIF, links to an opening, and serves downloads", async () => {
+    const orgId = await createOrg("kira", "Kira Media Co");
+    const { propertyId, floorId } = await createPropertyAndFloor("kira", orgId);
+
+    // A plan revision with one relational opening to link photos to.
+    const session = await createScanSession(ctx.pool, orgId, {
+      propertyId,
+      floorId,
+      requestedOutputs: ["normalized_json"],
+      externalReferences: []
+    });
+    const openingId = "0198bbbb-0000-7000-8000-000000000001";
+    await withTransaction(ctx.pool, async (tx) => {
+      const { revision } = await createPlanWithInitialRevision(tx, orgId, {
+        floorId,
+        scanSessionId: session.id,
+        reason: "media test revision",
+        geometrySchemaVersion: GEOMETRY_SCHEMA_VERSION,
+        buildPayload: (planId, revisionId) => ({
+          schemaVersion: GEOMETRY_SCHEMA_VERSION,
+          planId,
+          revisionId,
+          coordinateConventions: {
+            units: "meters",
+            plan: "x-z-projection",
+            winding: "ccw",
+            angles: "radians"
+          },
+          rooms: [],
+          walls: [],
+          openings: [],
+          validationFindings: []
+        })
+      });
+      await tx.query(
+        `insert into openings (id, organization_id, plan_revision_id, opening_type, room_ids)
+         values ($1, $2, $3, 'window', '[]'::jsonb)`,
+        [openingId, orgId, revision.id]
+      );
+    });
+
+    const jpegWithExif = Buffer.from(buildJpeg({ withExif: true, withXmp: true }));
+    const uploadedSha = createHash("sha256").update(jpegWithExif).digest("hex");
+
+    // Register + upload bytes.
+    const reg = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/media/uploads",
+      headers: asUser("kira", orgId),
+      payload: { byteSize: jpegWithExif.byteLength, contentType: "image/jpeg" }
+    });
+    expect(reg.statusCode).toBe(201);
+    const { mediaId } = reg.json();
+    const put = await ctx.app.inject({
+      method: "PUT",
+      url: `/v1/media/uploads/${mediaId}/content`,
+      headers: { ...asUser("kira", orgId), "content-type": "image/jpeg" },
+      payload: jpegWithExif
+    });
+    expect(put.statusCode).toBe(204);
+
+    // Complete: EXIF gets stripped, dimensions recorded.
+    const complete = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/media/uploads/${mediaId}/complete`,
+      headers: asUser("kira", orgId),
+      payload: { sha256: uploadedSha, byteSize: jpegWithExif.byteLength }
+    });
+    expect(complete.statusCode).toBe(200);
+    const media = complete.json();
+    expect(media.status).toBe("ready");
+    expect(media.exifPolicy).toBe("exif_app1_stripped");
+    expect(media.widthPx).toBe(2);
+    expect(media.heightPx).toBe(3);
+    // Stored sha differs from uploaded sha because EXIF was removed.
+    expect(media.sha256).not.toBe(uploadedSha);
+
+    // Download serves the stripped bytes (no EXIF payload marker).
+    const download = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/media/${mediaId}/content`,
+      headers: asUser("kira", orgId)
+    });
+    expect(download.statusCode).toBe(200);
+    expect(download.headers["content-type"]).toContain("image/jpeg");
+    expect(download.rawPayload.toString("hex")).not.toContain("deadbeef");
+
+    // Content-type spoofing is rejected: declared PNG, actual JPEG bytes.
+    const spoofReg = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/media/uploads",
+      headers: asUser("kira", orgId),
+      payload: { byteSize: jpegWithExif.byteLength, contentType: "image/png" }
+    });
+    const spoofId = spoofReg.json().mediaId;
+    await ctx.app.inject({
+      method: "PUT",
+      url: `/v1/media/uploads/${spoofId}/content`,
+      headers: { ...asUser("kira", orgId), "content-type": "image/png" },
+      payload: jpegWithExif
+    });
+    const spoofComplete = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/media/uploads/${spoofId}/complete`,
+      headers: asUser("kira", orgId),
+      payload: { sha256: uploadedSha, byteSize: jpegWithExif.byteLength }
+    });
+    expect(spoofComplete.statusCode).toBe(422);
+
+    // Link to the opening and list with a download URL.
+    const link = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/openings/${openingId}/media-links`,
+      headers: asUser("kira", orgId),
+      payload: { mediaId, position: 0 }
+    });
+    expect(link.statusCode).toBe(201);
+
+    const list = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/openings/${openingId}/media-links`,
+      headers: asUser("kira", orgId)
+    });
+    expect(list.json().data).toHaveLength(1);
+    expect(list.json().data[0].downloadUrl).toContain(`/v1/media/${mediaId}/content`);
+
+    // Cross-tenant media access is denied.
+    const otherOrg = await createOrg("liam", "Liam Co");
+    const cross = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/media/${mediaId}/content`,
+      headers: asUser("liam", otherOrg)
+    });
+    expect(cross.statusCode).toBe(404);
+  });
+});
+
+describe("plan corrections and acceptance", () => {
+  async function seedPlan(userId: string, orgId: string, floorId: string, sessionId: string) {
+    const roomId = "0198cccc-0000-7000-8000-000000000001";
+    const wallId = "0198cccc-0000-7000-8000-000000000002";
+    const openingId = "0198cccc-0000-7000-8000-000000000003";
+    const { plan, revision } = await withTransaction(ctx.pool, (tx) =>
+      createPlanWithInitialRevision(tx, orgId, {
+        floorId,
+        scanSessionId: sessionId,
+        reason: "import",
+        geometrySchemaVersion: GEOMETRY_SCHEMA_VERSION,
+        buildPayload: (planId, revisionId) => ({
+          schemaVersion: GEOMETRY_SCHEMA_VERSION,
+          planId,
+          revisionId,
+          coordinateConventions: {
+            units: "meters",
+            plan: "x-z-projection",
+            winding: "ccw",
+            angles: "radians"
+          },
+          rooms: [
+            {
+              id: roomId,
+              name: "Kitchen",
+              sourceRoomId: roomId,
+              boundary: [
+                { x: 0, y: 0 },
+                { x: 3, y: 0 },
+                { x: 3, y: 3 },
+                { x: 0, y: 3 }
+              ],
+              areaM2: 9,
+              confidence: "high"
+            }
+          ],
+          walls: [
+            {
+              id: wallId,
+              sourceId: null,
+              roomId,
+              start: { x: 0, y: 0 },
+              end: { x: 3, y: 0 },
+              thicknessM: 0.12,
+              heightM: 2.44,
+              source: "roomplan",
+              confidence: "high"
+            }
+          ],
+          openings: [
+            {
+              id: openingId,
+              sourceId: null,
+              type: "window",
+              wallId,
+              offsetAlongWallM: 1.5,
+              widthM: 0.9,
+              heightM: 1.2,
+              sillHeightM: 0.9,
+              roomIds: [roomId],
+              confidence: "medium",
+              verification: "unverified"
+            }
+          ],
+          validationFindings: []
+        })
+      })
+    );
+    return { plan, revision, roomId, wallId, openingId };
+  }
+
+  it("applies typed commands into a new immutable revision, verifies, and accepts", async () => {
+    const orgId = await createOrg("mia", "Mia Corrections Co");
+    const { propertyId, floorId } = await createPropertyAndFloor("mia", orgId);
+    const session = await createScanSession(ctx.pool, orgId, {
+      propertyId,
+      floorId,
+      requestedOutputs: ["normalized_json"],
+      externalReferences: []
+    });
+    // Put the session into needs_review so acceptance can complete it.
+    for (const [from, to] of [
+      ["draft", "capturing"],
+      ["capturing", "local_review"],
+      ["local_review", "queued_upload"],
+      ["queued_upload", "uploading"],
+      ["uploading", "processing"],
+      ["processing", "needs_review"]
+    ]) {
+      await ctx.pool.query("update scan_sessions set status = $1 where id = $2 and status = $3", [
+        to,
+        session.id,
+        from
+      ]);
+    }
+    const { plan, revision, roomId, wallId, openingId } = await seedPlan(
+      "mia",
+      orgId,
+      floorId,
+      session.id
+    );
+
+    const correction = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions`,
+      headers: asUser("mia", orgId),
+      payload: {
+        parentRevisionId: revision.id,
+        reason: "field corrections",
+        commands: [
+          { type: "renameRoom", roomId, name: "Kitchen (verified)" },
+          { type: "verifyOpening", openingId, source: "laser", widthM: 0.914, heightM: 1.219 },
+          {
+            type: "addOpening",
+            opening: {
+              openingType: "door",
+              wallId,
+              roomIds: [roomId],
+              widthM: 0.91,
+              heightM: 2.03,
+              sillHeightM: null
+            }
+          }
+        ]
+      }
+    });
+    expect(correction.statusCode).toBe(201);
+    const v2 = correction.json();
+    expect(v2.version).toBe(2);
+    expect(v2.parentRevisionId).toBe(revision.id);
+    expect(v2.payload.rooms[0].name).toBe("Kitchen (verified)");
+    const verified = v2.payload.openings.find((o: { id: string }) => o.id === openingId);
+    expect(verified.verification).toBe("field_verified");
+    expect(verified.widthM).toBeCloseTo(0.914);
+    expect(v2.payload.openings).toHaveLength(2);
+
+    // Parent revision is untouched (immutable).
+    const parentRes = await ctx.app.inject({
+      method: "GET",
+      url: `/v1/plans/${plan.id}/revisions/${revision.id}`,
+      headers: asUser("mia", orgId)
+    });
+    expect(parentRes.json().payload.rooms[0].name).toBe("Kitchen");
+    expect(parentRes.json().payload.openings).toHaveLength(1);
+
+    // Measurement provenance recorded for the laser verification.
+    const measurements = await ctx.pool.query(
+      "select * from measurements where subject_id = $1 order by semantic_type",
+      [openingId]
+    );
+    expect(measurements.rows.map((m) => m.semantic_type)).toEqual(["height", "width"]);
+    expect(measurements.rows.every((m) => m.source === "laser")).toBe(true);
+    expect(measurements.rows.every((m) => m.verification === "field_verified")).toBe(true);
+
+    // Stale save (old parent) is refused with the current revision id.
+    const stale = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions`,
+      headers: asUser("mia", orgId),
+      payload: {
+        parentRevisionId: revision.id,
+        reason: "stale",
+        commands: [{ type: "renameRoom", roomId, name: "X" }]
+      }
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().currentRevisionId).toBe(v2.id);
+
+    // Unknown reference is a command error, not a corrupt revision.
+    const badRef = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions`,
+      headers: asUser("mia", orgId),
+      payload: {
+        parentRevisionId: v2.id,
+        reason: "bad",
+        commands: [{ type: "removeOpening", openingId: "0198cccc-9999-7000-8000-000000000009" }]
+      }
+    });
+    expect(badRef.statusCode).toBe(422);
+
+    // Accepting an old revision is refused; accepting the current succeeds.
+    const acceptOld = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions/${revision.id}/accept`,
+      headers: asUser("mia", orgId)
+    });
+    expect(acceptOld.statusCode).toBe(409);
+
+    const accept = await ctx.app.inject({
+      method: "POST",
+      url: `/v1/plans/${plan.id}/revisions/${v2.id}/accept`,
+      headers: asUser("mia", orgId)
+    });
+    expect(accept.statusCode).toBe(200);
+    expect(accept.json().status).toBe("accepted");
+
+    const superseded = await ctx.pool.query("select status from plan_revisions where id = $1", [
+      revision.id
+    ]);
+    expect(superseded.rows[0].status).toBe("superseded");
+
+    const sessionAfter = await ctx.pool.query("select status from scan_sessions where id = $1", [
+      session.id
+    ]);
+    expect(sessionAfter.rows[0].status).toBe("completed");
+
+    const outbox = await ctx.pool.query(
+      "select event_type from outbox_events where organization_id = $1 and event_type = 'plan.accepted'",
+      [orgId]
+    );
+    expect(outbox.rows).toHaveLength(1);
   });
 });

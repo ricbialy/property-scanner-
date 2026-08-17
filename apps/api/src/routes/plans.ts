@@ -1,11 +1,27 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { findFloorById, findPlanById, findPlanRevision } from "@propertyscan/database";
+import {
+  acceptRevision,
+  appendOutboxEvent,
+  findFloorById,
+  findPlanById,
+  findPlanRevision,
+  insertChildRevision,
+  insertOpeningRecord,
+  insertRoomRecord,
+  insertWallRecord,
+  recordAuditEvent,
+  recordMeasurement,
+  transitionScanSession,
+  uuidv7,
+  withTransaction
+} from "@propertyscan/database";
 import { formatFeetInches } from "@propertyscan/geometry";
-import type { PlanRevisionPayload } from "@propertyscan/contracts";
+import { createRevisionRequestSchema, type PlanRevisionPayload } from "@propertyscan/contracts";
 
 import type { AppDeps } from "../context.js";
 import { requireTenant } from "../plugins/auth.js";
-import { sendProblem } from "../problems.js";
+import { sendProblem, sendValidationProblem } from "../problems.js";
+import { applyCommands, CommandError } from "../lib/applyCommands.js";
 
 interface RevisionContext {
   organizationId: string;
@@ -163,4 +179,207 @@ export function registerPlanRoutes(app: FastifyInstance, deps: AppDeps): void {
       };
     });
   }
+}
+
+export function registerRevisionRoutes(app: FastifyInstance, deps: AppDeps): void {
+  /**
+   * Create a correction revision from typed commands with optimistic
+   * concurrency: parentRevisionId must be the plan's current revision, else
+   * 409 with the current id so the client can reload and re-apply.
+   */
+  app.post("/v1/plans/:planId/revisions", async (request, reply) => {
+    const tenant = await requireTenant(deps, request, reply, "member");
+    if (!tenant) return;
+    const { planId } = request.params as { planId: string };
+    const parsed = createRevisionRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return sendValidationProblem(reply, parsed.error);
+    }
+    const plan = await findPlanById(deps.pool, tenant.organizationId, planId);
+    if (!plan || !plan.current_revision_id) {
+      return sendProblem(reply, 404, "Plan not found");
+    }
+    if (plan.current_revision_id !== parsed.data.parentRevisionId) {
+      return sendProblem(reply, 409, "Revision conflict", "The plan has a newer revision", {
+        currentRevisionId: plan.current_revision_id
+      });
+    }
+    const parent = await findPlanRevision(
+      deps.pool,
+      tenant.organizationId,
+      planId,
+      plan.current_revision_id
+    );
+    if (!parent) {
+      return sendProblem(reply, 404, "Plan revision not found");
+    }
+    if (parent.status === "accepted") {
+      // Corrections on an accepted plan start a new draft lineage from it —
+      // allowed; the accepted revision itself is never modified.
+    }
+
+    let applied: ReturnType<typeof applyCommands>;
+    try {
+      applied = applyCommands(parent.payload, parsed.data.commands, {
+        planId,
+        revisionId: "00000000-0000-7000-8000-000000000000" // replaced below
+      });
+    } catch (error) {
+      if (error instanceof CommandError) {
+        return sendProblem(reply, 422, "Command failed", error.message, {
+          commandIndex: error.commandIndex
+        });
+      }
+      throw error;
+    }
+
+    const revision = await withTransaction(deps.pool, async (tx) => {
+      const guard = await tx.query(
+        "select current_revision_id from plans where id = $1 and organization_id = $2 for update",
+        [planId, tenant.organizationId]
+      );
+      if (guard.rows[0]?.current_revision_id !== parsed.data.parentRevisionId) {
+        return null;
+      }
+      const created = await insertChildRevision(tx, tenant.organizationId, {
+        planId,
+        parentRevision: parent,
+        reason: parsed.data.reason,
+        authorType: "user",
+        buildPayload: (revisionId) => ({ ...applied.payload, revisionId })
+      });
+      // Relational projection rows are revision-local: payload ids stay stable
+      // across revisions (they are the reference identity), so the projection
+      // mints fresh row ids and remaps internal room/wall references.
+      const roomRowId = new Map<string, string>();
+      for (const room of created.payload.rooms) {
+        const rowId = uuidv7();
+        roomRowId.set(room.id, rowId);
+        await insertRoomRecord(tx, tenant.organizationId, {
+          id: rowId,
+          planRevisionId: created.id,
+          sourceRoomId: room.sourceRoomId,
+          name: room.name,
+          confidence: room.confidence,
+          boundary: room.boundary === "not_processed" ? null : room.boundary,
+          areaM2: room.areaM2 === "not_processed" ? null : room.areaM2
+        });
+      }
+      const wallRowId = new Map<string, string>();
+      for (const wall of created.payload.walls) {
+        const rowId = uuidv7();
+        wallRowId.set(wall.id, rowId);
+        await insertWallRecord(tx, tenant.organizationId, {
+          planRevisionId: created.id,
+          wall: { ...wall, id: rowId, roomId: roomRowId.get(wall.roomId) ?? wall.roomId }
+        });
+      }
+      for (const opening of created.payload.openings) {
+        await insertOpeningRecord(tx, tenant.organizationId, {
+          planRevisionId: created.id,
+          opening: {
+            ...opening,
+            id: uuidv7(),
+            wallId: opening.wallId ? (wallRowId.get(opening.wallId) ?? null) : null,
+            sourceId: opening.sourceId ?? opening.id
+          }
+        });
+      }
+      for (const verification of applied.verifications) {
+        for (const value of verification.values) {
+          await recordMeasurement(tx, tenant.organizationId, {
+            subjectType: "opening",
+            subjectId: verification.openingId,
+            value: value.valueM,
+            unit: "m",
+            semanticType: value.semanticType,
+            source: verification.source,
+            capturedBy: tenant.userId,
+            capturedAt: new Date(),
+            verification: "field_verified",
+            planRevisionId: created.id
+          });
+        }
+      }
+      await recordAuditEvent(tx, {
+        organizationId: tenant.organizationId,
+        actorType: "user",
+        actorId: tenant.userId,
+        action: "plan_revision.created",
+        subjectType: "plan_revision",
+        subjectId: created.id,
+        metadata: { planId, commandCount: parsed.data.commands.length }
+      });
+      return created;
+    });
+    if (!revision) {
+      const fresh = await findPlanById(deps.pool, tenant.organizationId, planId);
+      return sendProblem(reply, 409, "Revision conflict", "The plan has a newer revision", {
+        currentRevisionId: fresh?.current_revision_id ?? null
+      });
+    }
+    return reply.status(201).send({
+      id: revision.id,
+      planId: revision.plan_id,
+      parentRevisionId: revision.parent_revision_id,
+      status: revision.status,
+      version: revision.version,
+      payload: revision.payload,
+      createdAt: revision.created_at.toISOString()
+    });
+  });
+
+  app.post("/v1/plans/:planId/revisions/:revisionId/accept", async (request, reply) => {
+    const tenant = await requireTenant(deps, request, reply, "member");
+    if (!tenant) return;
+    const { planId, revisionId } = request.params as { planId: string; revisionId: string };
+    const result = await withTransaction(deps.pool, async (tx) => {
+      const accepted = await acceptRevision(tx, tenant.organizationId, planId, revisionId);
+      if (!accepted) {
+        return null;
+      }
+      const plan = await findPlanById(tx, tenant.organizationId, planId);
+      if (plan?.scan_session_id) {
+        // Session completes when a revision is accepted; a stale state is fine.
+        await transitionScanSession(
+          tx,
+          tenant.organizationId,
+          plan.scan_session_id,
+          "needs_review",
+          "completed"
+        ).catch(() => null);
+      }
+      await appendOutboxEvent(tx, {
+        organizationId: tenant.organizationId,
+        eventType: "plan.accepted",
+        resourceType: "plan",
+        resourceId: planId,
+        payload: { planId, revisionId }
+      });
+      await recordAuditEvent(tx, {
+        organizationId: tenant.organizationId,
+        actorType: "user",
+        actorId: tenant.userId,
+        action: "plan_revision.accepted",
+        subjectType: "plan_revision",
+        subjectId: revisionId,
+        metadata: { planId }
+      });
+      return accepted;
+    });
+    if (!result) {
+      return sendProblem(
+        reply,
+        409,
+        "Cannot accept",
+        "Only the plan's current revision can be accepted"
+      );
+    }
+    return {
+      id: result.id,
+      planId: result.plan_id,
+      status: result.status,
+      version: result.version
+    };
+  });
 }

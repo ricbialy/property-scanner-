@@ -82,8 +82,12 @@ struct PropertyScanAPIClient {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        // Local API routes need auth headers; presigned URLs ignore them.
-        applyAuth(&request)
+        // Only API routes get app auth headers. A presigned storage URL is
+        // authenticated by its query string alone — S3/MinIO rejects requests
+        // that also carry a conflicting Authorization header.
+        if targetsAPI(url) {
+            applyAuth(&request)
+        }
         let (_, response) = try await session.upload(for: request, from: data)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw APIError.http(status: (response as? HTTPURLResponse)?.statusCode ?? -1, title: nil)
@@ -112,7 +116,12 @@ struct PropertyScanAPIClient {
     // MARK: Plumbing
 
     private struct EmptyReply: Decodable {
+        init() {}
         init(from decoder: Decoder) throws {}
+    }
+
+    private func targetsAPI(_ url: URL) -> Bool {
+        url.host == baseURL.host && url.port == baseURL.port && url.scheme == baseURL.scheme
     }
 
     private func applyAuth(_ request: inout URLRequest) {
@@ -120,12 +129,18 @@ struct PropertyScanAPIClient {
         request.setValue(organizationId, forHTTPHeaderField: "X-Organization-Id")
     }
 
+    private func endpoint(_ path: String) -> URL {
+        // appendingPathComponent percent-escapes a leading slash; trim it so
+        // "/v1/..." joins cleanly onto the base URL.
+        baseURL.appendingPathComponent(path.hasPrefix("/") ? String(path.dropFirst()) : path)
+    }
+
     private func post<T: Decodable>(
         path: String,
         body: [String: Any],
         authorized: Bool = true
     ) async throws -> T {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        var request = URLRequest(url: endpoint(path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if authorized { applyAuth(&request) }
@@ -135,7 +150,7 @@ struct PropertyScanAPIClient {
     }
 
     private func get<T: Decodable>(path: String) async throws -> T {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        var request = URLRequest(url: endpoint(path))
         applyAuth(&request)
         let (data, response) = try await session.data(for: request)
         return try decode(data: data, response: response)

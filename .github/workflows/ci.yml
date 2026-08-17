@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   verify:
@@ -44,10 +45,10 @@ jobs:
         run: pnpm db:migrate
       - run: pnpm test:integration
 
-  # Simulator-only iOS build + unit tests (no signing). macOS runners are paid,
-  # so this job is opt-in: set the repository variable ENABLE_IOS_CI=true.
+  # Simulator-only iOS build + unit tests (no signing). Runs on every push/PR;
+  # set repository variable DISABLE_IOS_CI=true to pause it (macOS minutes).
   ios:
-    if: vars.ENABLE_IOS_CI == 'true'
+    if: vars.DISABLE_IOS_CI != 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +58,7 @@ jobs:
           cd apps/ios && xcodegen generate
       - name: Build and test on simulator
         run: |
+          set -o pipefail
           cd apps/ios
           xcodebuild -project PropertyScan.xcodeproj -scheme PropertyScan \
             -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \

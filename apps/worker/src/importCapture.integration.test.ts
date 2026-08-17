@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { zipSync } from "fflate";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type pg from "pg";
 import { createTestDatabase } from "@propertyscan/database/dist/testing.js";
@@ -56,7 +57,10 @@ interface SessionFixture {
   jobKey: string;
 }
 
-async function prepareSession(options?: FixtureOptions): Promise<SessionFixture> {
+async function prepareSession(
+  options?: FixtureOptions,
+  customZip?: Uint8Array
+): Promise<SessionFixture> {
   const org = await createOrganizationWithOwner(pool, {
     name: `Worker Org ${Math.random().toString(36).slice(2, 8)}`,
     ownerUserId: "user_worker_test"
@@ -75,7 +79,7 @@ async function prepareSession(options?: FixtureOptions): Promise<SessionFixture>
     externalReferences: []
   });
 
-  const { zip } = buildFixtureBundle(session.id, options ?? {});
+  const zip = customZip ?? buildFixtureBundle(session.id, options ?? {}).zip;
   const sha256 = createHash("sha256").update(zip).digest("hex");
   const objectKey = `orgs/${org.id}/scans/${session.id}/captures/${TWO_ROOM_FIXTURE.captureId}/bundle.zip`;
   await storage.put(objectKey, zip, "application/zip");
@@ -307,6 +311,32 @@ describe("import fixture matrix (spec §15.1)", () => {
     expect(payload.validationFindings.map((f) => f.code)).toContain("room_not_closed");
   });
 
+  it("treats syntactically invalid manifest JSON as a terminal failure, not a retry", async () => {
+    const zip = zipSync({ "manifest.json": new TextEncoder().encode("{not json!!") }, { level: 0 });
+    const fixture = await prepareSession(undefined, zip);
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("failed");
+    expect(session?.failure_reason).toMatch(/not valid JSON/);
+
+    const run = await pool.query("select * from import_runs where id = $1", [fixture.importRunId]);
+    expect(run.rows[0].status).toBe("failed");
+
+    // The job completed terminally — it must not be queued for retry.
+    const job = await pool.query("select status from jobs where job_key = $1", [fixture.jobKey]);
+    expect(job.rows[0].status).toBe("succeeded");
+  });
+
+  it("treats an unreadable zip bundle as a terminal failure", async () => {
+    const fixture = await prepareSession(undefined, new TextEncoder().encode("this is not a zip"));
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("failed");
+    expect(session?.failure_reason).toMatch(/not a readable zip/);
+  });
+
   it("rejects an unsupported manifest schema version with a visible failure", async () => {
     const fixture = await prepareSession({ variant: "unsupported-schema" });
     expect(await tick(deps)).toBe(true);
@@ -317,5 +347,130 @@ describe("import fixture matrix (spec §15.1)", () => {
 
     const run = await pool.query("select * from import_runs where id = $1", [fixture.importRunId]);
     expect(run.rows[0].status).toBe("failed");
+  });
+});
+
+describe("duplicate opening detection", () => {
+  it("flags coincident same-type openings for review without auto-merging", async () => {
+    const fixture = await prepareSession({ variant: "duplicate-opening" });
+    expect(await tick(deps)).toBe(true);
+
+    const session = await findScanSessionById(pool, fixture.organizationId, fixture.scanSessionId);
+    expect(session?.status).toBe("needs_review");
+
+    const planRows = await pool.query("select * from plans where id = $1", [session!.plan_id]);
+    const revision = await findPlanRevision(
+      pool,
+      fixture.organizationId,
+      planRows.rows[0].id,
+      planRows.rows[0].current_revision_id
+    );
+    const payload = revision!.payload;
+
+    // Both observations are preserved — resolution belongs to human review.
+    const doors = payload.openings.filter((o) => o.type === "door");
+    expect(doors).toHaveLength(2);
+
+    const duplicateFindings = payload.validationFindings.filter(
+      (f) => f.code === "duplicate_opening_candidate"
+    );
+    expect(duplicateFindings).toHaveLength(1);
+    expect(duplicateFindings[0]!.message).toContain("5f3a1b2c-3001");
+    expect(duplicateFindings[0]!.message).toContain("5f3a1b2c-3002");
+  });
+});
+
+describe("outbox webhook dispatch", () => {
+  it("delivers signed events to registered endpoints, retries failures, deduplicates", async () => {
+    const { createServer } = await import("node:http");
+    const { createOrganizationWithOwner: mkOrg } = await import("@propertyscan/database");
+    const { createWebhookEndpoint, appendOutboxEvent } = await import("@propertyscan/database");
+    const { verifyWebhookSignature, SIGNATURE_HEADER } =
+      await import("@propertyscan/integration-studiokl");
+    const { dispatchOutbox } = await import("./dispatchOutbox.js");
+
+    const masterKey = "dev-only-not-a-real-key-0000000000000000";
+    const secret = "webhook-test-secret-0001";
+    const org = await mkOrg(pool, { name: "Webhook Org", ownerUserId: "user_webhook" });
+
+    const received: Array<{ body: string; signature: string }> = [];
+    let failNext = true;
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        if (failNext) {
+          failNext = false;
+          res.writeHead(500).end();
+          return;
+        }
+        received.push({ body, signature: String(req.headers[SIGNATURE_HEADER] ?? "") });
+        res.writeHead(200).end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+
+    await createWebhookEndpoint(pool, org.id, {
+      url: `http://127.0.0.1:${port}/hooks`,
+      secret,
+      masterKey
+    });
+    const eventId = await appendOutboxEvent(pool, {
+      organizationId: org.id,
+      eventType: "plan.accepted",
+      resourceType: "plan",
+      resourceId: "0198dddd-0000-7000-8000-000000000001",
+      payload: { planId: "0198dddd-0000-7000-8000-000000000001" }
+    });
+
+    const dispatchDeps = {
+      pool,
+      log: deps.log,
+      masterKey,
+      externalWebhooksDisabled: true // localhost is still permitted
+    };
+
+    // First pass: endpoint fails -> delivery marked failed with backoff.
+    // The dispatcher works in batches (like the real worker's repeated ticks),
+    // so keep dispatching until the backlog from earlier tests is drained and
+    // our event's delivery has been attempted.
+    let delivery = await pool.query("select * from webhook_deliveries where outbox_event_id = $1", [
+      eventId
+    ]);
+    for (let i = 0; i < 20 && !delivery.rows[0]; i += 1) {
+      await dispatchOutbox(dispatchDeps);
+      delivery = await pool.query("select * from webhook_deliveries where outbox_event_id = $1", [
+        eventId
+      ]);
+    }
+    expect(delivery.rows[0].status).toBe("failed");
+    expect(delivery.rows[0].attempts).toBe(1);
+
+    // Force the retry window open and dispatch again: delivered + verifiable.
+    await pool.query(
+      "update webhook_deliveries set next_attempt_at = now() where outbox_event_id = $1",
+      [eventId]
+    );
+    await dispatchOutbox(dispatchDeps);
+    delivery = await pool.query("select * from webhook_deliveries where outbox_event_id = $1", [
+      eventId
+    ]);
+    expect(delivery.rows[0].status).toBe("succeeded");
+    expect(received).toHaveLength(1);
+
+    const verdict = verifyWebhookSignature(received[0]!.body, received[0]!.signature, {
+      secretsByKeyId: { k1: secret }
+    });
+    expect(verdict).toMatchObject({ ok: true, keyId: "k1" });
+    const envelope = JSON.parse(received[0]!.body);
+    expect(envelope.eventId).toBe(eventId);
+    expect(envelope.eventType).toBe("plan.accepted");
+
+    // Re-running the dispatcher does not deliver the same event twice.
+    await dispatchOutbox(dispatchDeps);
+    expect(received).toHaveLength(1);
+
+    server.close();
   });
 });

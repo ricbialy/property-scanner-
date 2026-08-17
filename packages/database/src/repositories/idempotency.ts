@@ -32,30 +32,68 @@ export async function findIdempotencyRecord(
   return (rows[0] as IdempotencyRecord | undefined) ?? null;
 }
 
-export async function storeIdempotencyRecord(
+/**
+ * Atomically reserve an idempotency key before running the creation handler,
+ * so two concurrent same-key requests cannot both execute it. A row with a
+ * null response_status is a pending reservation held by an in-flight request.
+ */
+export async function reserveIdempotencyKey(
   db: Queryable,
   input: {
     organizationId: string;
     endpoint: string;
     key: string;
     requestHash: string;
+  }
+): Promise<{ reserved: boolean; existing: IdempotencyRecord | null }> {
+  const { rows } = await db.query(
+    `insert into idempotency_keys
+       (id, organization_id, endpoint, idempotency_key, request_hash)
+     values ($1, $2, $3, $4, $5)
+     on conflict (organization_id, endpoint, idempotency_key) do nothing
+     returning *`,
+    [uuidv7(), input.organizationId, input.endpoint, input.key, input.requestHash]
+  );
+  if (rows[0]) {
+    return { reserved: true, existing: null };
+  }
+  const existing = await findIdempotencyRecord(db, input.organizationId, input.endpoint, input.key);
+  return { reserved: false, existing };
+}
+
+export async function completeIdempotencyRecord(
+  db: Queryable,
+  input: {
+    organizationId: string;
+    endpoint: string;
+    key: string;
     responseStatus: number;
     responseBody: unknown;
   }
 ): Promise<void> {
   await db.query(
-    `insert into idempotency_keys
-       (id, organization_id, endpoint, idempotency_key, request_hash, response_status, response_body)
-     values ($1, $2, $3, $4, $5, $6, $7)
-     on conflict (organization_id, endpoint, idempotency_key) do nothing`,
+    `update idempotency_keys
+       set response_status = $4, response_body = $5
+     where organization_id = $1 and endpoint = $2 and idempotency_key = $3`,
     [
-      uuidv7(),
       input.organizationId,
       input.endpoint,
       input.key,
-      input.requestHash,
       input.responseStatus,
       JSON.stringify(input.responseBody)
     ]
+  );
+}
+
+/** Drop a pending reservation after a handler failure so a retry can execute. */
+export async function releaseIdempotencyKey(
+  db: Queryable,
+  input: { organizationId: string; endpoint: string; key: string }
+): Promise<void> {
+  await db.query(
+    `delete from idempotency_keys
+     where organization_id = $1 and endpoint = $2 and idempotency_key = $3
+       and response_status is null`,
+    [input.organizationId, input.endpoint, input.key]
   );
 }

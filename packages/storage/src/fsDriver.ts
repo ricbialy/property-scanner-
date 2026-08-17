@@ -38,6 +38,9 @@ export function createFsStorage(rootDir: string): ObjectStorage {
     },
     async createUploadUrl(_key, _contentType, _expiresSeconds) {
       return null;
+    },
+    async createDownloadUrl(_key, _expiresSeconds) {
+      return null;
     }
   };
 }

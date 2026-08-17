@@ -49,6 +49,15 @@ export function normalizeGeometry(inputs: RoomToNormalize[]): NormalizedGeometry
   const rooms: PlanRevisionPayload["rooms"] = [];
   const walls: PlanRevisionPayload["walls"] = [];
   const openings: PlanRevisionPayload["openings"] = [];
+  /** World-space centers for cross-room duplicate detection. */
+  const openingCenters: Array<{
+    id: string;
+    sourceId: string;
+    type: string;
+    x: number;
+    y: number;
+    widthM: number;
+  }> = [];
 
   for (const input of inputs) {
     const roomT: Mat4ColumnMajor = (input.structureTransform as Mat4ColumnMajor) ?? IDENTITY_MAT4;
@@ -193,6 +202,14 @@ export function normalizeGeometry(inputs: RoomToNormalize[]): NormalizedGeometry
               ? 0
               : null;
 
+        openingCenters.push({
+          id: openingId,
+          sourceId,
+          type: kind.type,
+          x: center.x,
+          y: center.y,
+          widthM
+        });
         openings.push({
           id: openingId,
           sourceId,
@@ -205,6 +222,34 @@ export function normalizeGeometry(inputs: RoomToNormalize[]): NormalizedGeometry
           roomIds: [payloadRoomId],
           confidence: confidenceLevel(surface.confidence),
           verification: "unverified"
+        });
+      }
+    }
+  }
+
+  // Duplicate suppression is review-driven, never automatic: near-coincident
+  // same-type openings (shared doors seen from both rooms, or duplicated
+  // RoomPlan surfaces) become findings for human resolution. Emitting a
+  // finding instead of merging follows the same principle as unclosed rooms —
+  // geometry decisions with uncertainty belong to the review workflow.
+  const DUPLICATE_CENTER_TOLERANCE_M = 0.2;
+  const DUPLICATE_WIDTH_TOLERANCE_M = 0.1;
+  for (let i = 0; i < openingCenters.length; i += 1) {
+    for (let j = i + 1; j < openingCenters.length; j += 1) {
+      const a = openingCenters[i]!;
+      const b = openingCenters[j]!;
+      if (a.type !== b.type) continue;
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      if (
+        distance <= DUPLICATE_CENTER_TOLERANCE_M &&
+        Math.abs(a.widthM - b.widthM) <= DUPLICATE_WIDTH_TOLERANCE_M
+      ) {
+        findings.push({
+          code: "duplicate_opening_candidate",
+          severity: "warning",
+          message: `${a.type} ${a.sourceId} and ${b.sourceId} coincide within ${DUPLICATE_CENTER_TOLERANCE_M} m; likely one physical opening — resolve in review`,
+          subjectType: "opening",
+          subjectId: a.id
         });
       }
     }

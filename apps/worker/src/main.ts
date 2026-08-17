@@ -29,7 +29,11 @@ const deps: WorkerDeps = {
   pool,
   storage,
   log,
-  workerId: `worker-${hostname()}-${process.pid}`
+  workerId: `worker-${hostname()}-${process.pid}`,
+  webhooks: {
+    masterKey: env.WEBHOOK_MASTER_ENCRYPTION_KEY,
+    externalWebhooksDisabled: env.DISABLE_EXTERNAL_WEBHOOKS
+  }
 };
 
 const POLL_INTERVAL_MS = 1000;

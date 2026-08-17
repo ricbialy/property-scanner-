@@ -10,11 +10,12 @@ const { buildFixtureBundle } = await import(
 );
 
 const sessionId = process.argv[2];
+const variant = process.argv[3];
 if (!sessionId) {
-  console.error("usage: build-demo-bundle.mjs <scanSessionId>");
+  console.error("usage: build-demo-bundle.mjs <scanSessionId> [variant]");
   process.exit(1);
 }
-const { manifest, zip } = buildFixtureBundle(sessionId);
+const { manifest, zip } = buildFixtureBundle(sessionId, variant ? { variant } : {});
 mkdirSync(join(root, ".local"), { recursive: true });
 writeFileSync(join(root, ".local/demo-bundle.zip"), zip);
 writeFileSync(
